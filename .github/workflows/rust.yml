@@ -1,5 +1,4 @@
 name: Rust
-
 on:
   merge_group:
     branches: ["master"]
@@ -14,7 +13,6 @@ on:
     types: [ opened, synchronize, reopened, edited ]
     paths-ignore:
       - 'debian/**'
-
 concurrency:
   group: >
     ${{
@@ -26,27 +24,55 @@ concurrency:
         || format('push-{0}-rust', github.ref)
     }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
   CARGO_TERM_COLOR: always
-
   ASMFLAGS: -march=haswell
   CC: gcc-15
   CFLAGS: -march=haswell
   CXX: g++-15
   CXXFLAGS: -march=haswell -DQUILL_ACTIVE_LOG_LEVEL=QUILL_LOG_LEVEL_CRITICAL
   TRIEDB_TARGET: triedb_driver
-
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: self-hosted
     container:
       image: peach10.devcore4.com/category-labs/builder
       options: --privileged
-
     steps:
+      # First, check if this is an external PR
+      - name: Check if external PR
+        id: check_external
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]] && [[ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
+            echo "is_external=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_external=false" >> $GITHUB_OUTPUT
+          fi
+
+      # For external PRs, show message and exit
+      - name: Handle external PR
+        if: steps.check_external.outputs.is_external == 'true'
+        run: |
+          echo "::notice::This is an external PR from a fork"
+          echo "=================================="
+          echo "External PR detected!"
+          echo "=================================="
+          echo ""
+          echo "This PR requires manual testing by a maintainer."
+          echo ""
+          echo "Maintainers: Please use the '/test all' command to run full tests."
+          echo ""
+          echo "This workflow is skipping automatic tests due to:"
+          echo "- Private submodules that require authentication"
+          echo "- Security restrictions on fork PRs"
+          echo ""
+          echo "Thank you for your contribution!"
+          echo "=================================="
+          exit 0
+
+      # All following steps only run for non-external PRs
       - name: Generate a token
+        if: steps.check_external.outputs.is_external != 'true'
         id: generate_token
         uses: tibdex/github-app-token@v1
         with:
@@ -54,25 +80,45 @@ jobs:
           private_key: ${{ secrets.REPO_READONLY_GITHUB_APP_KEY }}
           permissions: >-
             {"contents": "read"}
+      
       - name: Checkout repository
+        if: steps.check_external.outputs.is_external != 'true'
         uses: actions/checkout@v4
         with:
           submodules: recursive
           token: ${{ steps.generate_token.outputs.token }}
+      
       - run: rustup toolchain install nightly-2024-12-10 --profile minimal --component rustfmt
+        if: steps.check_external.outputs.is_external != 'true'
+      
       - run: rustup toolchain install 1.85.0-x86_64-unknown-linux-gnu --profile minimal --component clippy
+        if: steps.check_external.outputs.is_external != 'true'
+      
       - name: Install cargo-binstall
+        if: steps.check_external.outputs.is_external != 'true'
         uses: cargo-bins/cargo-binstall@main
+      
       - name: Install cargo-shear
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo binstall --no-confirm cargo-shear
+      
       - name: Verify lockfile
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo update --workspace --locked
+      
       - name: Lint unused dependencies
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo shear
+      
       - name: Format
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo +nightly-2024-12-10 fmt --all --check
+      
       - uses: Swatinem/rust-cache@v2
+        if: steps.check_external.outputs.is_external != 'true'
+      
       - name: Lint
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo clippy --all-targets --all-features --
           -D clippy::suspicious
           -D clippy::style
@@ -97,14 +143,26 @@ jobs:
           -A clippy::mutable_key_type
           -A clippy::large_enum_variant
           -A clippy::doc-overindented-list-items
+      
       - name: Check
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo check --all-targets --all-features
+      
       - name: Run tests
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo test --release --all-targets --all-features
+      
       - name: Build docs
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo doc -p monad-event-ring -p monad-exec-events
+      
       - name: Run doc tests
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo test --release --doc --all-features
+      
       - run: rustup target add wasm32-unknown-unknown
+        if: steps.check_external.outputs.is_external != 'true'
+      
       - name: Check WASM
+        if: steps.check_external.outputs.is_external != 'true'
         run: cargo check --target wasm32-unknown-unknown -p monad-debugger
