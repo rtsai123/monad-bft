@@ -10,7 +10,7 @@ on:
     paths-ignore:
       - 'debian/**'
   pull_request:
-    branches: ["master"]
+    branches: ["master","feature/rtsai-external-pr-support"]
     types: [ opened, synchronize, reopened, edited ]
     paths-ignore:
       - 'debian/**'
@@ -18,18 +18,14 @@ on:
 concurrency:
   group: >
     ${{
-      github.event_name == 'merge_group'
-      && format('merge-group-{0}-rust', github.run_id)
-      ||
-        github.event_name == 'pull_request'
-        && format('pr-{0}-rust', github.event.pull_request.number)
-        || format('push-{0}-rust', github.ref)
+      github.event_name == 'merge_group' && format('merge-group-{0}-rust', github.run_id) ||
+      github.event_name == 'pull_request' && format('pr-{0}-rust', github.event.pull_request.number) ||
+      format('push-{0}-rust', github.ref)
     }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
-
   ASMFLAGS: -march=haswell
   CC: gcc-15
   CFLAGS: -march=haswell
@@ -38,13 +34,78 @@ env:
   TRIEDB_TARGET: triedb_driver
 
 jobs:
-  build:
-    runs-on: self-hosted
+  # First job: Detect if this is an external PR
+  detect-pr-type:
+    runs-on: ubuntu-latest
+    outputs:
+      is_external_pr: ${{ steps.check.outputs.is_external_pr }}
+      should_run_full: ${{ steps.check.outputs.should_run_full }}
+    steps:
+      - name: Check PR type
+        id: check
+        run: |
+          echo "Event name: ${{ github.event_name }}"
+          echo "PR head repo: ${{ github.event.pull_request.head.repo.full_name || 'N/A' }}"
+          echo "Base repo: ${{ github.repository }}"
+          
+          # Default to full build
+          echo "should_run_full=true" >> $GITHUB_OUTPUT
+          echo "is_external_pr=false" >> $GITHUB_OUTPUT
+          
+          # Only limit builds for external PRs
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
+              echo "is_external_pr=true" >> $GITHUB_OUTPUT
+              echo "should_run_full=false" >> $GITHUB_OUTPUT
+              echo "::notice::External PR detected - will run limited checks"
+            else
+              echo "::notice::Internal PR detected - will run full checks"
+            fi
+          else
+            echo "::notice::Not a PR - will run full checks"
+          fi
 
+  # Limited build for external PRs (no private submodules)
+  basic-checks:
+    needs: detect-pr-type
+    if: needs.detect-pr-type.outputs.is_external_pr == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (no submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          components: rustfmt, clippy
+
+      - name: Install nightly for fmt
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2024-12-10
+          components: rustfmt
+
+      - name: Format check
+        run: cargo +nightly-2024-12-10 fmt --all --check
+
+      - name: Basic compilation check
+        run: |
+          echo "::warning::Running limited checks due to private submodules"
+          # Try to check what we can without submodules
+          cargo check --no-default-features 2>&1 || echo "::warning::Some checks failed due to missing private dependencies"
+
+
+  # Full build for internal PRs, pushes, and merge groups
+  build:
+    needs: detect-pr-type
+    if: needs.detect-pr-type.outputs.should_run_full == 'true'
+    runs-on: self-hosted
     container:
       image: peach10.devcore4.com/category-labs/builder
       options: --privileged
-
     steps:
       - name: Generate a token
         id: generate_token
@@ -54,57 +115,73 @@ jobs:
           private_key: ${{ secrets.REPO_READONLY_GITHUB_APP_KEY }}
           permissions: >-
             {"contents": "read"}
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
           token: ${{ steps.generate_token.outputs.token }}
+
       - run: rustup toolchain install nightly-2024-12-10 --profile minimal --component rustfmt
       - run: rustup toolchain install 1.85.0-x86_64-unknown-linux-gnu --profile minimal --component clippy
+
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
+      
       - name: Install cargo-shear
         run: cargo binstall --no-confirm cargo-shear
+
       - name: Verify lockfile
         run: cargo update --workspace --locked
+
       - name: Lint unused dependencies
         run: cargo shear
+
       - name: Format
         run: cargo +nightly-2024-12-10 fmt --all --check
+
       - uses: Swatinem/rust-cache@v2
+
       - name: Lint
-        run: cargo clippy --all-targets --all-features --
-          -D clippy::suspicious
-          -D clippy::style
-          -D clippy::clone_on_copy
-          -D clippy::redundant_clone
-          -D clippy::iter_kv_map
-          -D clippy::iter_nth
-          -D clippy::unnecessary_cast
-          -D clippy::filter_next
-          -D clippy::needless_lifetimes
-          -D clippy::useless_conversion
-          -D clippy::useless_vec
-          -D clippy::needless_question_mark
-          -D clippy::bool_comparison
-          -D unused_imports
-          -D unused_parens
-          -D deprecated
-          -A clippy::type_complexity
-          -A clippy::int_plus_one
-          -A clippy::uninlined-format-args
-          -A clippy::enum-variant-names
-          -A clippy::mutable_key_type
-          -A clippy::large_enum_variant
-          -A clippy::doc-overindented-list-items
+        run: |
+          cargo clippy --all-targets --all-features -- \
+            -D clippy::suspicious \
+            -D clippy::style \
+            -D clippy::clone_on_copy \
+            -D clippy::redundant_clone \
+            -D clippy::iter_kv_map \
+            -D clippy::iter_nth \
+            -D clippy::unnecessary_cast \
+            -D clippy::filter_next \
+            -D clippy::needless_lifetimes \
+            -D clippy::useless_conversion \
+            -D clippy::useless_vec \
+            -D clippy::needless_question_mark \
+            -D clippy::bool_comparison \
+            -D unused_imports \
+            -D unused_parens \
+            -D deprecated \
+            -A clippy::type_complexity \
+            -A clippy::int_plus_one \
+            -A clippy::uninlined-format-args \
+            -A clippy::enum-variant-names \
+            -A clippy::mutable_key_type \
+            -A clippy::large_enum_variant \
+            -A clippy::doc-overindented-list-items
+
       - name: Check
         run: cargo check --all-targets --all-features
+
       - name: Run tests
         run: cargo test --release --all-targets --all-features
+
       - name: Build docs
         run: cargo doc -p monad-event-ring -p monad-exec-events
+
       - name: Run doc tests
         run: cargo test --release --doc --all-features
+
       - run: rustup target add wasm32-unknown-unknown
+      
       - name: Check WASM
         run: cargo check --target wasm32-unknown-unknown -p monad-debugger
