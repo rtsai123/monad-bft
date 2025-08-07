@@ -97,41 +97,6 @@ jobs:
           # Try to check what we can without submodules
           cargo check --no-default-features 2>&1 || echo "::warning::Some checks failed due to missing private dependencies"
 
-#      - name: Comment on PR
-#        uses: actions/github-script@v7
-#        with:
-#          script: |
-#            const comments = await github.rest.issues.listComments({
-#              owner: context.repo.owner,
-#              repo: context.repo.repo,
-#              issue_number: context.issue.number,
-#            });
-#            
-#            const botComment = comments.data.find(c => 
-#              c.body.includes('This PR comes from a fork')
-#            );
-#            
-#            if (!botComment) {
-#              await github.rest.issues.createComment({
-#                owner: context.repo.owner,
-#                repo: context.repo.repo,
-#                issue_number: context.issue.number,
-#                body: `Thanks for your contribution! 🚀
-#                
-#                This PR comes from a fork, so automated tests are limited due to private submodules.
-#                
-#                **Basic checks completed:**
-#                - ✅ Code formatting
-#                - ⚠️ Compilation (limited due to private dependencies)
-#                
-#                A maintainer will review your changes and run the full test suite.
-#                
-#                **For maintainers:** To run full tests:
-#                1. Go to [Actions → Test External PR](https://github.com/${{ github.repository }}/actions/workflows/test-external-pr.yml)
-#                2. Click "Run workflow"
-#                3. Enter PR number: **${{ github.event.pull_request.number }}**`
-#              });
-#            }
 
   # Full build for internal PRs, pushes, and merge groups
   build:
