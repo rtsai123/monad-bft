@@ -13,6 +13,7 @@ on:
     types: [ opened, synchronize, reopened, edited ]
     paths-ignore:
       - 'debian/**'
+
 concurrency:
   group: >
     ${{
@@ -24,6 +25,7 @@ concurrency:
         || format('push-{0}-rust', github.ref)
     }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   ASMFLAGS: -march=haswell
@@ -44,7 +46,7 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]] && [[ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
             echo "is_external=true" >> $GITHUB_OUTPUT
-            echo "::notice::External PR detected - will require manual testing"
+            echo "::notice::External PR detected - setting pending status"
           else
             echo "is_external=false" >> $GITHUB_OUTPUT
           fi
@@ -53,27 +55,39 @@ jobs:
     needs: check-pr
     if: needs.check-pr.outputs.is_external == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+      pull-requests: read
     steps:
-      - name: External PR requires manual testing
+      - name: Set pending status for manual tests
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Create a pending status check
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: 'pending',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/test-command.yml`,
+              description: 'Waiting for maintainer to run /test all',
+              context: 'Tests / Manual Review Required'
+            });
+            
+            console.log('✅ Set pending status for external PR');
+      
+      - name: Display instructions
         run: |
-          echo "::error::External PR requires manual testing"
           echo "=================================="
-          echo "❌ External PR - Manual Testing Required"
+          echo "🔄 External PR - Manual Testing Required"
           echo "=================================="
           echo ""
-          echo "This PR from a fork cannot run automated tests due to:"
-          echo "- Private submodules that require authentication"
-          echo "- Security restrictions on fork PRs"
+          echo "A required status check has been set to 'pending'."
           echo ""
-          echo "NEXT STEPS FOR MAINTAINERS:"
-          echo "1. Review the code changes"
-          echo "2. Use the '/test all' command to run full tests"
+          echo "This PR cannot be merged until a maintainer runs: /test all"
           echo ""
-          echo "The PR cannot be merged until tests pass via '/test all'"
-          echo ""
-          echo "Thank you for your contribution!"
+          echo "The status will automatically update when tests complete."
           echo "=================================="
-          exit 1  # This makes the check fail
 
   build:
     needs: check-pr
