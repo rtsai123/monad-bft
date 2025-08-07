@@ -44,7 +44,7 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]] && [[ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
             echo "is_external=true" >> $GITHUB_OUTPUT
-            echo "::notice::External PR detected - will skip build"
+            echo "::notice::External PR detected - will require manual testing"
           else
             echo "is_external=false" >> $GITHUB_OUTPUT
           fi
@@ -54,23 +54,26 @@ jobs:
     if: needs.check-pr.outputs.is_external == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: External PR message
+      - name: External PR requires manual testing
         run: |
-          echo "::notice::This is an external PR from a fork"
+          echo "::error::External PR requires manual testing"
           echo "=================================="
-          echo "External PR detected!"
+          echo "❌ External PR - Manual Testing Required"
           echo "=================================="
           echo ""
-          echo "This PR requires manual testing by a maintainer."
-          echo ""
-          echo "Maintainers: Please use the '/test all' command to run full tests."
-          echo ""
-          echo "This workflow is skipping automatic tests due to:"
+          echo "This PR from a fork cannot run automated tests due to:"
           echo "- Private submodules that require authentication"
           echo "- Security restrictions on fork PRs"
           echo ""
+          echo "NEXT STEPS FOR MAINTAINERS:"
+          echo "1. Review the code changes"
+          echo "2. Use the '/test all' command to run full tests"
+          echo ""
+          echo "The PR cannot be merged until tests pass via '/test all'"
+          echo ""
           echo "Thank you for your contribution!"
           echo "=================================="
+          exit 1  # This makes the check fail
 
   build:
     needs: check-pr
