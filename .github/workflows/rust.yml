@@ -34,7 +34,7 @@ env:
   TRIEDB_TARGET: triedb_driver
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     container:
       image: peach10.devcore4.com/category-labs/builder
       options: --privileged
