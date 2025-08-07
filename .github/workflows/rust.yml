@@ -10,7 +10,7 @@ on:
     paths-ignore:
       - 'debian/**'
   pull_request:
-    branches: ["master"]
+    branches: ["master","feature/rtsai-external-pr-support"]
     types: [ opened, synchronize, reopened, edited ]
     paths-ignore:
       - 'debian/**'
