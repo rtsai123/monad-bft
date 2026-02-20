@@ -50,6 +50,8 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tokio::{sync::mpsc, time::Instant};
 use tracing::{debug, debug_span, error, info, trace_span, warn};
 
+#[cfg(feature = "test-scripted-blocks")]
+pub use self::scripted::ScriptedTxPoolExecutorClient;
 pub use self::{client::EthTxPoolExecutorClient, ipc::EthTxPoolIpcConfig};
 use self::{
     client::ForwardedTxs, forward::EthTxPoolForwardingManager, ipc::EthTxPoolIpcServer,
@@ -63,6 +65,8 @@ mod ipc;
 mod metrics;
 mod preload;
 mod reset;
+#[cfg(feature = "test-scripted-blocks")]
+pub mod scripted;
 
 pub struct EthTxPoolExecutor<ST, SCT, SBT, CCT, CRT, TIS>
 where

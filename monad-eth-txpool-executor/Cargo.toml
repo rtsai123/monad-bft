@@ -21,6 +21,7 @@ monad-executor = { workspace = true }
 monad-executor-glue = { workspace = true }
 monad-secp = { workspace = true }
 monad-state-backend = { workspace = true }
+monad-system-calls = { workspace = true, optional = true }
 monad-types = { workspace = true }
 monad-validator = { workspace = true }
 
@@ -38,11 +39,16 @@ serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+[features]
+test-scripted-blocks = ["monad-system-calls", "tokio/io-util", "tokio/net"]
+
 [dev-dependencies]
+monad-eth-block-validator = { workspace = true }
 monad-eth-testutil = { workspace = true }
 monad-testutil = { workspace = true }
 monad-tfm = { workspace = true }
 
 alloy-primitives = { workspace = true }
+rand = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
