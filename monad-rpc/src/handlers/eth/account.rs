@@ -14,6 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloy_primitives::B256;
+use monad_eth_types::AccountCode;
 use monad_rpc_docs::rpc;
 use monad_triedb_utils::triedb_env::Triedb;
 use serde::Deserialize;
@@ -23,6 +24,7 @@ use crate::{
     chainstate::{get_block_key_from_tag_or_hash, ChainState},
     types::{
         eth_json::{BlockTagOrHash, EthAddress, MonadU256},
+        ethhex::encode_bytes,
         jsonrpc::{JsonRpcError, JsonRpcResult},
     },
 };
@@ -86,14 +88,14 @@ pub async fn monad_eth_getCode<T: Triedb>(
         .await
         .map_err(JsonRpcError::internal_error)?;
 
-    let code = if let Some(code_hash) = account.code_hash {
-        chain_state
+    let code = match &account.code {
+        AccountCode::InlineDelegated(inline_code) => encode_bytes(inline_code),
+        AccountCode::CodeHash(code_hash) => chain_state
             .triedb_env
-            .get_code(block_key, code_hash)
+            .get_code(block_key, *code_hash)
             .await
-            .map_err(JsonRpcError::internal_error)?
-    } else {
-        "0x".to_string()
+            .map_err(JsonRpcError::internal_error)?,
+        AccountCode::None => "0x".to_string(),
     };
 
     match chain_state

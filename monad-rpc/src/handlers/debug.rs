@@ -23,6 +23,7 @@ use alloy_primitives::{
 };
 use alloy_rlp::{Decodable, Encodable, RlpDecodable};
 use monad_archive::prelude::{BlockDataReader, IndexReader};
+use monad_eth_types::AccountCode;
 use monad_rpc_docs::rpc;
 use monad_triedb_utils::triedb_env::{BlockKey, FinalizedBlockKey, Triedb};
 use monad_types::SeqNum;
@@ -741,18 +742,21 @@ async fn include_code_output<T: Triedb>(
             .await
             .map_err(JsonRpcError::internal_error)?;
 
-        frame.output = if let Some(code_hash) = account.code_hash {
-            let code = triedb_env
-                .get_code(block_key, code_hash)
-                .await
-                .map_err(JsonRpcError::internal_error)?;
+        frame.output = match &account.code {
+            AccountCode::InlineDelegated(inline_code) => Bytes::copy_from_slice(inline_code),
+            AccountCode::CodeHash(code_hash) => {
+                let code = triedb_env
+                    .get_code(block_key, *code_hash)
+                    .await
+                    .map_err(JsonRpcError::internal_error)?;
 
-            let decoded_code = ethhex::decode_bytes(&code)
-                .map_err(|_| JsonRpcError::internal_error("could not decode code".to_string()))?;
+                let decoded_code = ethhex::decode_bytes(&code).map_err(|_| {
+                    JsonRpcError::internal_error("could not decode code".to_string())
+                })?;
 
-            decoded_code.into()
-        } else {
-            Bytes::default()
+                decoded_code.into()
+            }
+            AccountCode::None => Bytes::default(),
         };
     }
 
