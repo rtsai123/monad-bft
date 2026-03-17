@@ -36,6 +36,10 @@ monad_executor::metric_consts! {
         name: "monad.raptorcast.decoding_cache.signature_verifications_rate_limited",
         help: "Signature verifications rate limited",
     }
+    pub GAUGE_RAPTORCAST_CHUNKS_DROPPED_INCOMPATIBLE_VERSION {
+        name: "monad.raptorcast.chunks_dropped_incompatible_version",
+        help: "Chunks dropped due to incompatible raptorcast version",
+    }
     pub PRIMARY_BROADCAST_LATENCY_P99_MS {
         name: "monad.bft.raptorcast.udp.primary_broadcast_latency_p99_ms",
         help: "P99 primary UDP broadcast latency in ms (30s rolling window)",

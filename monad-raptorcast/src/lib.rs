@@ -90,6 +90,7 @@ pub mod parser;
 pub mod raptorcast_secondary;
 pub mod udp;
 pub mod util;
+pub mod v1_rollout;
 
 const SIGNATURE_SIZE: usize = 65;
 const DEFAULT_RETRY_ATTEMPTS: u64 = 3;
@@ -116,9 +117,11 @@ where
     dedicated_full_nodes: Vec<NodeId<CertificateSignaturePubKey<ST>>>,
     peer_discovery_driver: Arc<Mutex<PeerDiscoveryDriver<PD>>>,
 
+    current_round: Round,
     current_epoch: Epoch,
 
     udp_state: udp::UdpState<ST>,
+    v1_rollout: v1_rollout::DeterministicProtocolRolloutStage,
     message_builder: OwnedMessageBuilder<ST>,
     secondary_message_builder: Option<OwnedMessageBuilder<ST>>,
 
@@ -225,6 +228,13 @@ where
             .segment_size(segment_size)
             .redundancy(secondary_redundancy);
 
+        let mut udp_state = udp::UdpState::new(
+            self_id,
+            config.udp_message_max_age_ms,
+            config.sig_verification_rate_limit,
+        );
+        udp_state.set_v1_rollout(config.deterministic_protocol_rollout);
+
         Self {
             self_id,
             is_dynamic_fullnode,
@@ -238,13 +248,14 @@ where
             message_builder,
             secondary_message_builder: Some(secondary_message_builder),
 
+            // TODO: call UpdateCurrentRound instead of pass in
+            // current_{epoch,round} as argument to allow downstream
+            // components to initialize appropriately.
+            current_round: Round(0),
             current_epoch,
 
-            udp_state: udp::UdpState::new(
-                self_id,
-                config.udp_message_max_age_ms,
-                config.sig_verification_rate_limit,
-            ),
+            udp_state,
+            v1_rollout: config.deterministic_protocol_rollout,
 
             tcp_reader,
             tcp_writer,
@@ -429,7 +440,7 @@ where
         });
 
         match target {
-            RouterTarget::Broadcast(epoch) | RouterTarget::Raptorcast(epoch) => {
+            RouterTarget::Broadcast(epoch) | RouterTarget::Raptorcast { epoch, .. } => {
                 let group = match PrimaryBroadcastGroup::of_epoch(
                     epoch,
                     &self_id, // author
@@ -459,7 +470,9 @@ where
 
                 let build_target = match &target {
                     RouterTarget::Broadcast(_) => BuildTarget::Broadcast(group),
-                    RouterTarget::Raptorcast(_) => BuildTarget::raptorcast(group),
+                    RouterTarget::Raptorcast { round, .. } => {
+                        self.v1_rollout.build_target(*round, group)
+                    }
                     _ => unreachable!(),
                 };
                 let outbound_message =
@@ -657,6 +670,7 @@ where
             invite_future_dist_max: Round(5),
             invite_accept_heartbeat_ms: 100,
         },
+        deterministic_protocol_rollout: v1_rollout::CURRENT_STAGE,
     };
     let pd = PeerDiscoveryDriver::new(peer_discovery_builder);
     let shared_pd = Arc::new(Mutex::new(pd));
@@ -710,6 +724,7 @@ where
             invite_future_dist_max: Round(5),
             invite_accept_heartbeat_ms: 100,
         },
+        deterministic_protocol_rollout: v1_rollout::CURRENT_STAGE,
     };
     let pd = PeerDiscoveryDriver::new(peer_discovery_builder);
     let shared_pd = Arc::new(Mutex::new(pd));
@@ -770,6 +785,8 @@ where
 
                         self.epoch_validators.retain(|e, _| *e + Epoch(1) >= epoch);
                     }
+
+                    self.current_round = round;
                     self.udp_state.update_current_round(round);
                     self.full_node_groups.delete_expired(round);
                     self.peer_discovery_driver

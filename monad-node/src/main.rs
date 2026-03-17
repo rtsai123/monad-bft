@@ -712,6 +712,7 @@ where
                     .collect(),
             },
             secondary_instance: node_config.fullnode_raptorcast,
+            deterministic_protocol_rollout: monad_raptorcast::v1_rollout::CURRENT_STAGE,
         },
         dp_builder,
         peer_discovery_builder,

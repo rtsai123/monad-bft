@@ -29,7 +29,8 @@ use crate::{
     commit::RoundCommitments,
     decoding::{DecoderCache, DecodingContext, TryDecodeError, TryDecodeStatus},
     metrics::{
-        UdpStateMetrics, GAUGE_RAPTORCAST_DECODING_CACHE_SIGNATURE_VERIFICATIONS_RATE_LIMITED,
+        UdpStateMetrics, GAUGE_RAPTORCAST_CHUNKS_DROPPED_INCOMPATIBLE_VERSION,
+        GAUGE_RAPTORCAST_DECODING_CACHE_SIGNATURE_VERIFICATIONS_RATE_LIMITED,
     },
     packet::deterministic,
     parser::{
@@ -41,6 +42,7 @@ use crate::{
         FullNodeGroupMap, GlobalMerkleRoot, MerkleRoot, NodeIdHash, PrimaryBroadcastGroup,
         SecondaryBroadcastGroup,
     },
+    v1_rollout::{self, DeterministicProtocolRolloutStage},
 };
 
 pub const SIGNATURE_CACHE_SIZE: usize = 10_000;
@@ -73,7 +75,9 @@ pub(crate) struct UdpState<ST: CertificateSignatureRecoverable> {
 
     signature_verifier: ChunkSignatureVerifier<ST>,
 
+    current_round: Round,
     round_commitments: RoundCommitments,
+    v1_rollout: DeterministicProtocolRolloutStage,
 
     metrics: UdpStateMetrics,
 }
@@ -97,10 +101,16 @@ impl<ST: CertificateSignatureRecoverable> UdpState<ST> {
             decoder_cache: DecoderCache::default(),
             signature_verifier,
 
+            current_round: Round(0),
             round_commitments: RoundCommitments::default(),
+            v1_rollout: v1_rollout::CURRENT_STAGE,
 
             metrics: UdpStateMetrics::new(),
         }
+    }
+
+    pub fn set_v1_rollout(&mut self, stage: DeterministicProtocolRolloutStage) {
+        self.v1_rollout = stage;
     }
 
     pub fn metrics(&self) -> &UdpStateMetrics {
@@ -112,6 +122,7 @@ impl<ST: CertificateSignatureRecoverable> UdpState<ST> {
     }
 
     pub fn update_current_round(&mut self, round: Round) {
+        self.current_round = round;
         self.round_commitments.update_current_round(round);
     }
 
@@ -444,13 +455,19 @@ impl<ST: CertificateSignatureRecoverable> UdpState<ST> {
                 BroadcastMode::Unspecified => {
                     self.handle_unicast(epoch_validators, &chunk, message.sender.as_ref())
                 }
-                BroadcastMode::Primary | BroadcastMode::DeterministicPrimary(_) => self
-                    .handle_primary_raptorcast(
+                BroadcastMode::Primary | BroadcastMode::DeterministicPrimary(_) => {
+                    if !self.v1_rollout.should_accept(&chunk) {
+                        self.metrics.executor_metrics_mut()
+                            [GAUGE_RAPTORCAST_CHUNKS_DROPPED_INCOMPATIBLE_VERSION] += 1;
+                        continue;
+                    }
+                    self.handle_primary_raptorcast(
                         epoch_validators,
                         &chunk,
                         rebroadcast_to,
                         message.sender.as_ref(),
-                    ),
+                    )
+                }
 
                 BroadcastMode::Secondary => self.handle_secondary_raptorcast(
                     epoch_validators,
@@ -1311,6 +1328,7 @@ mod tests_deterministic {
             compute_hash, BroadcastMode, BuildTarget, FullNodeGroupMap, PrimaryBroadcastGroup,
             UdpMessage, ValidatorGroupMap,
         },
+        v1_rollout::DeterministicProtocolRolloutStage,
     };
 
     type SignatureType = SecpSignature;
@@ -1536,6 +1554,7 @@ mod tests_deterministic {
         let full_node_groups = FullNodeGroupMap::default();
 
         let mut udp_state = UdpState::<SignatureType>::new(self_id, u64::MAX, 10_000);
+        udp_state.set_v1_rollout(DeterministicProtocolRolloutStage::AlwaysV1);
 
         // payload will fail to parse but shouldn't panic on index error
         let stride = deterministic::PacketLayout::SEGMENT_LEN;
@@ -1693,6 +1712,7 @@ mod tests_deterministic {
         let epoch_validators: BTreeMap<_, _> = [(EPOCH, validators)].into();
         let full_node_groups = FullNodeGroupMap::default();
         let mut udp_state = UdpState::<SignatureType>::new(receiver_id, u64::MAX, 10_000);
+        udp_state.set_v1_rollout(DeterministicProtocolRolloutStage::AlwaysV1);
 
         let stride = deterministic::PacketLayout::SEGMENT_LEN;
         let mut all_decoded = Vec::new();
@@ -1805,6 +1825,8 @@ mod tests_deterministic {
         let epoch_validators: BTreeMap<_, _> = [(EPOCH, validators)].into();
         let full_node_groups = FullNodeGroupMap::default();
         let mut udp_state = UdpState::<SignatureType>::new(validator_id, u64::MAX, 10_000);
+        udp_state.set_v1_rollout(DeterministicProtocolRolloutStage::AlwaysV1);
+
         let stride = deterministic::PacketLayout::SEGMENT_LEN;
 
         let mut decoded_msg = None;

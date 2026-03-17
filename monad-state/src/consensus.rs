@@ -394,7 +394,7 @@ where
                 .sign(self.keypair);
 
                 vec![Command::RouterCommand(RouterCommand::Publish {
-                    target: RouterTarget::Raptorcast(epoch),
+                    target: RouterTarget::Raptorcast { round, epoch },
                     message: VerifiedMonadMessage::Consensus(msg),
                 })]
             }
