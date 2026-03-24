@@ -193,11 +193,13 @@ where
                     SecondaryRaptorCastModeConfig::None,
                     tcp_socket,
                     authenticated_socket,
+                    None,
                     non_authenticated_socket,
                     control,
                     shared_peer_discovery_driver,
                     Epoch(0),
                     auth_protocol,
+                    None,
                 ))
             }
         },
