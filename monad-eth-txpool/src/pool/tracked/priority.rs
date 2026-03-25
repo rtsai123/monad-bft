@@ -19,6 +19,7 @@ use std::{
 };
 
 use alloy_primitives::Address;
+use monad_crypto::certificate_signature::PubKey;
 use tracing::error;
 
 use crate::{pool::tracked::TrackedTxList, EthTxPoolEventTracker};
@@ -36,11 +37,11 @@ pub(super) struct PriorityMap {
 }
 
 impl PriorityMap {
-    pub fn update_priority(
+    pub fn update_priority<PT: PubKey>(
         &mut self,
         event_tracker: &EthTxPoolEventTracker<'_>,
         address: Address,
-        tx_list: &TrackedTxList,
+        tx_list: &TrackedTxList<PT>,
     ) {
         let time = if let Some((stale_priority, time)) = self.by_address.remove(&address) {
             if !self.sorted.remove(&(stale_priority, time, address)) {

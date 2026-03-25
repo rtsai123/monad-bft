@@ -313,7 +313,8 @@ fn run_custom_iter<const N: usize>(
                         &state_backend,
                         &MockChainConfig::DEFAULT,
                     )
-                    .expect("create proposal succeeds");
+                    .expect("create proposal succeeds")
+                    .0;
 
                 let decoded_txns = encoded_txns.body.transactions;
 
@@ -2112,4 +2113,428 @@ fn test_eip_7702_sponsor_with_1559() {
             })),
         ],
     );
+}
+
+#[test]
+fn test_forwarded_sender_gas_contributions_follow_pool_lifecycle() {
+    let mut pool = EthTxPool::default_testing();
+    let mut eth_block_policy = make_test_block_policy();
+    let state_backend = InMemoryStateInner::new(
+        SeqNum(4),
+        InMemoryBlockState::genesis(BTreeMap::from_iter([(
+            secret_to_eth_address(S1),
+            AccountState::max_balance(),
+        )])),
+    );
+    let metrics = EthTxPoolMetrics::default();
+    let mut ipc_events = BTreeMap::default();
+    let mut event_tracker = EthTxPoolEventTracker::new(&metrics, &mut ipc_events);
+
+    pool.update_committed_block(
+        &mut event_tracker,
+        &MockChainConfig::DEFAULT,
+        generate_block_with_txs(
+            Round(0),
+            SeqNum(0),
+            BASE_FEE_PER_GAS,
+            &MockChainConfig::DEFAULT,
+            Vec::default(),
+        ),
+    );
+
+    let sender1 = NodeId::new(NopPubKey::from_bytes(&[1_u8; 32]).unwrap());
+    let sender2 = NodeId::new(NopPubKey::from_bytes(&[2_u8; 32]).unwrap());
+    let mut tracked_txs = make_forwarded_test_txs([100_000, 200_000, 300_000]).into_iter();
+    let tx1 = tracked_txs.next().unwrap();
+    let tx2 = tracked_txs.next().unwrap();
+    let tx3 = tracked_txs.next().unwrap();
+    pool.insert_forwarded_txs(
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        &MockChainConfig::DEFAULT,
+        vec![
+            (sender1, recover_tx(tx1.clone())),
+            (sender2, recover_tx(tx2.clone())),
+            (sender1, recover_tx(tx3.clone())),
+        ],
+        |_| {},
+    );
+
+    let sender_gas = create_proposal_sender_gas(
+        &mut pool,
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        1,
+    );
+
+    assert_eq!(
+        sender_gas.get(&sender1),
+        Some(&(tx1.gas_limit() + tx3.gas_limit()))
+    );
+    assert_eq!(sender_gas.get(&sender2), Some(&tx2.gas_limit()));
+    assert_eq!(sender_gas.len(), 2);
+
+    commit_block_for_sender_gas_tests(
+        &mut pool,
+        &mut eth_block_policy,
+        &mut event_tracker,
+        generate_block_with_txs(
+            Round(1),
+            SeqNum(1),
+            BASE_FEE_PER_GAS,
+            &MockChainConfig::DEFAULT,
+            vec![recover_tx(tx1)],
+        ),
+    );
+
+    let sender_gas_after_commit = create_proposal_sender_gas(
+        &mut pool,
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        2,
+    );
+
+    assert_eq!(
+        sender_gas_after_commit.get(&sender1),
+        Some(&tx3.gas_limit())
+    );
+    assert_eq!(
+        sender_gas_after_commit.get(&sender2),
+        Some(&tx2.gas_limit())
+    );
+    assert_eq!(sender_gas_after_commit.len(), 2);
+}
+
+fn make_forwarded_test_txs(gas_limits: impl IntoIterator<Item = u64>) -> Vec<TxEnvelope> {
+    make_forwarded_test_txs_from_nonce(u64::default(), gas_limits)
+}
+
+fn make_forwarded_test_txs_from_nonce(
+    start_nonce: u64,
+    gas_limits: impl IntoIterator<Item = u64>,
+) -> Vec<TxEnvelope> {
+    gas_limits
+        .into_iter()
+        .enumerate()
+        .map(|(offset, gas_limit)| {
+            make_legacy_tx(
+                S1,
+                BASE_FEE + 1,
+                gas_limit,
+                start_nonce.saturating_add(offset as u64),
+                0,
+            )
+        })
+        .collect()
+}
+
+fn create_proposal_sender_gas(
+    pool: &mut EthTxPool<
+        SignatureType,
+        SignatureCollectionType,
+        StateBackendType,
+        MockChainConfig,
+        MockChainRevision,
+    >,
+    event_tracker: &mut EthTxPoolEventTracker<'_>,
+    eth_block_policy: &EthBlockPolicy<
+        SignatureType,
+        SignatureCollectionType,
+        MockChainConfig,
+        MockChainRevision,
+    >,
+    state_backend: &StateBackendType,
+    seq_num: u64,
+) -> BTreeMap<NodeId<NopPubKey>, u64> {
+    let mock_keypair = NopKeyPair::from_bytes(&mut [5_u8; 32]).unwrap();
+
+    pool.create_proposal(
+        event_tracker,
+        Epoch(1),
+        Round(seq_num),
+        SeqNum(seq_num),
+        BASE_FEE_PER_GAS,
+        usize::MAX,
+        PROPOSAL_GAS_LIMIT,
+        PROPOSAL_SIZE_LIMIT,
+        [0_u8; 20],
+        GENESIS_TIMESTAMP + seq_num as u128,
+        NodeId::new(NopPubKey::from_bytes(&[0_u8; 32]).unwrap()),
+        RoundSignature::new(Round(0), &mock_keypair),
+        vec![],
+        eth_block_policy,
+        state_backend,
+        &MockChainConfig::DEFAULT,
+    )
+    .expect("create proposal succeeds")
+    .1
+    .into_iter()
+    .collect()
+}
+
+fn commit_block_for_sender_gas_tests(
+    pool: &mut EthTxPool<
+        SignatureType,
+        SignatureCollectionType,
+        StateBackendType,
+        MockChainConfig,
+        MockChainRevision,
+    >,
+    eth_block_policy: &mut EthBlockPolicy<
+        SignatureType,
+        SignatureCollectionType,
+        MockChainConfig,
+        MockChainRevision,
+    >,
+    event_tracker: &mut EthTxPoolEventTracker<'_>,
+    block: monad_eth_block_policy::EthValidatedBlock<SignatureType, SignatureCollectionType>,
+) {
+    BlockPolicy::<_, _, _, StateBackendType, _, _>::update_committed_block(
+        eth_block_policy,
+        &block,
+    );
+    pool.update_committed_block(event_tracker, &MockChainConfig::DEFAULT, block);
+}
+
+#[test]
+fn test_forwarded_sender_gas_contributions_preserve_sender_on_duplicate_drop() {
+    let mut pool = EthTxPool::default_testing();
+    let eth_block_policy = make_test_block_policy();
+    let state_backend = InMemoryStateInner::new(
+        SeqNum(4),
+        InMemoryBlockState::genesis(BTreeMap::from_iter([(
+            secret_to_eth_address(S1),
+            AccountState::max_balance(),
+        )])),
+    );
+    let metrics = EthTxPoolMetrics::default();
+    let mut ipc_events = BTreeMap::default();
+    let mut event_tracker = EthTxPoolEventTracker::new(&metrics, &mut ipc_events);
+
+    pool.update_committed_block(
+        &mut event_tracker,
+        &MockChainConfig::DEFAULT,
+        generate_block_with_txs(
+            Round(0),
+            SeqNum(0),
+            BASE_FEE_PER_GAS,
+            &MockChainConfig::DEFAULT,
+            Vec::default(),
+        ),
+    );
+
+    let sender = NodeId::new(NopPubKey::from_bytes(&[3_u8; 32]).unwrap());
+    let tx = make_forwarded_test_txs([100_000])
+        .into_iter()
+        .next()
+        .unwrap();
+
+    pool.insert_forwarded_txs(
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        &MockChainConfig::DEFAULT,
+        vec![(sender, recover_tx(tx.clone()))],
+        |_| {},
+    );
+    pool.insert_forwarded_txs(
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        &MockChainConfig::DEFAULT,
+        vec![(sender, recover_tx(tx.clone()))],
+        |_| panic!("duplicate forwarded tx should not be reinserted"),
+    );
+
+    let sender_gas = create_proposal_sender_gas(
+        &mut pool,
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        1,
+    );
+
+    assert_eq!(sender_gas.get(&sender), Some(&tx.gas_limit()));
+    assert_eq!(sender_gas.len(), 1);
+}
+
+#[test]
+fn test_forwarded_sender_gas_contributions_preserve_original_sender_on_duplicate_receive() {
+    let mut pool = EthTxPool::default_testing();
+    let eth_block_policy = make_test_block_policy();
+    let state_backend = InMemoryStateInner::new(
+        SeqNum(4),
+        InMemoryBlockState::genesis(BTreeMap::from_iter([(
+            secret_to_eth_address(S1),
+            AccountState::max_balance(),
+        )])),
+    );
+    let metrics = EthTxPoolMetrics::default();
+    let mut ipc_events = BTreeMap::default();
+    let mut event_tracker = EthTxPoolEventTracker::new(&metrics, &mut ipc_events);
+
+    pool.update_committed_block(
+        &mut event_tracker,
+        &MockChainConfig::DEFAULT,
+        generate_block_with_txs(
+            Round(0),
+            SeqNum(0),
+            BASE_FEE_PER_GAS,
+            &MockChainConfig::DEFAULT,
+            Vec::default(),
+        ),
+    );
+
+    let sender1 = NodeId::new(NopPubKey::from_bytes(&[4_u8; 32]).unwrap());
+    let sender2 = NodeId::new(NopPubKey::from_bytes(&[5_u8; 32]).unwrap());
+    let tx = make_forwarded_test_txs([100_000])
+        .into_iter()
+        .next()
+        .unwrap();
+
+    pool.insert_forwarded_txs(
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        &MockChainConfig::DEFAULT,
+        vec![(sender1, recover_tx(tx.clone()))],
+        |_| {},
+    );
+    pool.insert_forwarded_txs(
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        &MockChainConfig::DEFAULT,
+        vec![(sender2, recover_tx(tx.clone()))],
+        |_| panic!("duplicate forwarded tx should not be reinserted"),
+    );
+
+    let sender_gas = create_proposal_sender_gas(
+        &mut pool,
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        1,
+    );
+
+    assert_eq!(sender_gas.get(&sender1), Some(&tx.gas_limit()));
+    assert_eq!(sender_gas.get(&sender2), None);
+    assert_eq!(sender_gas.len(), 1);
+}
+
+#[test]
+fn test_forwarded_sender_gas_contributions_drop_when_pool_not_ready() {
+    let mut pool = EthTxPool::default_testing();
+    let eth_block_policy = make_test_block_policy();
+    let state_backend = InMemoryStateInner::new(
+        SeqNum(4),
+        InMemoryBlockState::genesis(BTreeMap::from_iter([(
+            secret_to_eth_address(S1),
+            AccountState::max_balance(),
+        )])),
+    );
+    let metrics = EthTxPoolMetrics::default();
+    let mut ipc_events = BTreeMap::default();
+    let mut event_tracker = EthTxPoolEventTracker::new(&metrics, &mut ipc_events);
+
+    let sender = NodeId::new(NopPubKey::from_bytes(&[6_u8; 32]).unwrap());
+    let tx = make_forwarded_test_txs([100_000])
+        .into_iter()
+        .next()
+        .unwrap();
+
+    pool.insert_forwarded_txs(
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        &MockChainConfig::DEFAULT,
+        vec![(sender, recover_tx(tx))],
+        |_| panic!("pool should not accept txs before last commit"),
+    );
+
+    let sender_gas = create_proposal_sender_gas(
+        &mut pool,
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        1,
+    );
+
+    assert!(sender_gas.is_empty());
+}
+
+#[test]
+fn test_forwarded_sender_gas_contributions_remove_replaced_forwarded_tx_after_same_batch_duplicates(
+) {
+    let mut pool = EthTxPool::default_testing();
+    let eth_block_policy = make_test_block_policy();
+    let state_backend = InMemoryStateInner::new(
+        SeqNum(4),
+        InMemoryBlockState::genesis(BTreeMap::from_iter([(
+            secret_to_eth_address(S1),
+            AccountState::max_balance(),
+        )])),
+    );
+    let metrics = EthTxPoolMetrics::default();
+    let mut ipc_events = BTreeMap::default();
+    let mut event_tracker = EthTxPoolEventTracker::new(&metrics, &mut ipc_events);
+
+    pool.update_committed_block(
+        &mut event_tracker,
+        &MockChainConfig::DEFAULT,
+        generate_block_with_txs(
+            Round(0),
+            SeqNum(0),
+            BASE_FEE_PER_GAS,
+            &MockChainConfig::DEFAULT,
+            Vec::default(),
+        ),
+    );
+
+    let sender = NodeId::new(NopPubKey::from_bytes(&[7_u8; 32]).unwrap());
+    let forwarded_tx = make_forwarded_test_txs([100_000])
+        .into_iter()
+        .next()
+        .unwrap();
+    let replacement_tx = make_legacy_tx(
+        S1,
+        BASE_FEE + 2,
+        forwarded_tx.gas_limit(),
+        forwarded_tx.nonce(),
+        0,
+    );
+
+    pool.insert_forwarded_txs(
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        &MockChainConfig::DEFAULT,
+        vec![
+            (sender, recover_tx(forwarded_tx.clone())),
+            (sender, recover_tx(forwarded_tx.clone())),
+            (sender, recover_tx(forwarded_tx)),
+        ],
+        |_| {},
+    );
+    pool.insert_txs(
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        &MockChainConfig::DEFAULT,
+        vec![(recover_tx(replacement_tx), PoolTxKind::owned_default())],
+        |_| {},
+    );
+
+    let sender_gas = create_proposal_sender_gas(
+        &mut pool,
+        &mut event_tracker,
+        &eth_block_policy,
+        &state_backend,
+        1,
+    );
+
+    assert!(sender_gas.is_empty());
 }

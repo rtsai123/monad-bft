@@ -523,11 +523,12 @@ fn check_txpool_coherency(
 
     info!(
         "Txpool created proposal with {} txs for seq_num {:?}",
-        proposal.body.transactions.len(),
+        proposal.0.body.transactions.len(),
         block_under_test.header().seq_num
     );
 
     let txs = proposal
+        .0
         .body
         .transactions
         .iter()

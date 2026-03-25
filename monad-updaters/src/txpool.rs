@@ -276,7 +276,9 @@ where
                         waker.wake();
                     }
                 }
-                TxPoolCommand::BlockCommit(_) | TxPoolCommand::Reset { .. } => {}
+                TxPoolCommand::BlockCommit(_)
+                | TxPoolCommand::Reset { .. }
+                | TxPoolCommand::Contribution { .. } => {}
                 TxPoolCommand::InsertForwardedTxs { .. } => {
                     unimplemented!(
                         "MockTxPoolExecutor should never recieve txs with MockExecutionProtocol"
@@ -346,7 +348,7 @@ where
                     let (base_fee, base_fee_trend, base_fee_moment) =
                         block_policy.compute_base_fee(&extending_blocks, &self.chain_config);
 
-                    let proposed_execution_inputs = pool
+                    let (proposed_execution_inputs, _) = pool
                         .create_proposal(
                             &mut event_tracker,
                             epoch,
@@ -447,6 +449,7 @@ where
                         |_| {},
                     );
                 }
+                TxPoolCommand::Contribution { .. } => {}
                 // TODO: add chain config to MockTxPoolExecutor if we're testing
                 // param forking with it
                 TxPoolCommand::EnterRound { .. } => {}

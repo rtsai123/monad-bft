@@ -22,6 +22,7 @@ use alloy_consensus::Transaction;
 use alloy_primitives::Address;
 use indexmap::map::VacantEntry;
 use monad_chain_config::{execution_revision::MonadExecutionRevision, revision::ChainRevision};
+use monad_crypto::certificate_signature::PubKey;
 use monad_eth_block_policy::nonce_usage::NonceUsage;
 use monad_eth_txpool_types::EthTxPoolDropReason;
 use monad_tfm::base_fee::MIN_BASE_FEE;
@@ -36,19 +37,19 @@ use crate::{pool::tracked::priority::Priority, EthTxPoolEventTracker};
 /// PendingTxList, this struct also enforces non-emptyness in the txs map to guarantee that
 /// TrackedTxMap has a transaction for every address.
 #[derive(Clone, Debug, Default)]
-pub struct TrackedTxList {
+pub struct TrackedTxList<PT: PubKey> {
     account_nonce: Nonce,
-    txs: BTreeMap<Nonce, (PoolTx, Instant)>,
+    txs: BTreeMap<Nonce, (PoolTx<PT>, Instant)>,
 }
 
-impl TrackedTxList {
+impl<PT: PubKey> TrackedTxList<PT> {
     pub fn try_new(
         this_entry: VacantEntry<'_, Address, Self>,
         event_tracker: &mut EthTxPoolEventTracker<'_>,
         limit_tracker: &mut TrackedTxLimits,
-        txs: Vec<PoolTx>,
+        txs: Vec<PoolTx<PT>>,
         account_nonce: u64,
-        on_insert: &mut impl FnMut(&PoolTx),
+        on_insert: &mut impl FnMut(&PoolTx<PT>),
         last_commit_base_fee: u64,
     ) {
         let mut this = TrackedTxList {
@@ -71,11 +72,11 @@ impl TrackedTxList {
         this_entry.insert(this);
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &PoolTx> {
+    pub fn iter(&self) -> impl Iterator<Item = &PoolTx<PT>> {
         self.txs.values().map(|(tx, _)| tx)
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PoolTx> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PoolTx<PT>> {
         self.txs.values_mut().map(|(tx, _)| tx)
     }
 
@@ -107,7 +108,7 @@ impl TrackedTxList {
     pub fn get_queued(
         &self,
         pending_nonce_usage: Option<NonceUsage>,
-    ) -> impl Iterator<Item = &PoolTx> {
+    ) -> impl Iterator<Item = &PoolTx<PT>> {
         let mut account_nonce = pending_nonce_usage
             .map_or(self.account_nonce, |pending_nonce_usage| {
                 pending_nonce_usage.apply_to_account_nonce(self.account_nonce)
@@ -131,9 +132,9 @@ impl TrackedTxList {
         &mut self,
         event_tracker: &mut EthTxPoolEventTracker<'_>,
         limit_tracker: &mut TrackedTxLimits,
-        tx: PoolTx,
+        tx: PoolTx<PT>,
         last_commit_base_fee: u64,
-    ) -> Option<&PoolTx> {
+    ) -> Option<&PoolTx<PT>> {
         if tx.nonce() < self.account_nonce {
             event_tracker.drop(tx.hash(), EthTxPoolDropReason::NonceTooLow);
             return None;

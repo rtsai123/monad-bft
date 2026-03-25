@@ -20,7 +20,7 @@ use alloy_rlp::Encodable;
 use monad_chain_config::{execution_revision::ExecutionChainParams, revision::ChainParams};
 use monad_consensus_types::block::ConsensusBlockHeader;
 use monad_crypto::certificate_signature::{
-    CertificateSignaturePubKey, CertificateSignatureRecoverable,
+    CertificateSignaturePubKey, CertificateSignatureRecoverable, PubKey,
 };
 use monad_eth_block_policy::{
     compute_txn_max_gas_cost, compute_txn_max_value,
@@ -30,7 +30,7 @@ use monad_eth_txpool_types::{EthTxPoolDropReason, DEFAULT_TX_PRIORITY};
 use monad_eth_types::EthExecutionProtocol;
 use monad_system_calls::{validator::SystemTransactionValidator, SYSTEM_SENDER_ETH_ADDRESS};
 use monad_tfm::base_fee::MIN_BASE_FEE;
-use monad_types::{Balance, Nonce, SeqNum};
+use monad_types::{Balance, NodeId, Nonce, SeqNum};
 use monad_validator::signature_collection::SignatureCollection;
 use tracing::trace;
 
@@ -56,9 +56,10 @@ impl PoolTxKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PoolTx {
+pub struct PoolTx<PT: PubKey> {
     tx: Recovered<TxEnvelope>,
     kind: PoolTxKind,
+    forwarded_sender: Option<NodeId<PT>>,
     forward_last_seqnum: SeqNum,
     forward_retries: usize,
     max_value: Balance,
@@ -72,7 +73,7 @@ pub struct PoolTxRecoveredAuthorization {
     pub authorization: Authorization,
 }
 
-impl PoolTx {
+impl<PT: PubKey> PoolTx<PT> {
     pub fn validate<ST, SCT>(
         last_commit: &ConsensusBlockHeader<ST, SCT, EthExecutionProtocol>,
         chain_id: u64,
@@ -80,6 +81,7 @@ impl PoolTx {
         execution_params: &ExecutionChainParams,
         tx: Recovered<TxEnvelope>,
         kind: PoolTxKind,
+        forwarded_sender: Option<NodeId<PT>>,
     ) -> Result<Self, (Recovered<TxEnvelope>, EthTxPoolDropReason)>
     where
         ST: CertificateSignatureRecoverable,
@@ -162,6 +164,7 @@ impl PoolTx {
         Ok(Self {
             tx,
             kind,
+            forwarded_sender,
             forward_last_seqnum: last_commit.seq_num,
             forward_retries: 0,
             max_value,
@@ -226,6 +229,10 @@ impl PoolTx {
 
     pub fn gas_limit(&self) -> u64 {
         self.tx.gas_limit()
+    }
+
+    pub fn forwarded_sender(&self) -> Option<NodeId<PT>> {
+        self.forwarded_sender
     }
 
     pub fn size(&self) -> u64 {

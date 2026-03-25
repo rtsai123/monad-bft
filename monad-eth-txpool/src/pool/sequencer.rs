@@ -24,13 +24,14 @@ use alloy_primitives::Address;
 use monad_chain_config::{revision::ChainRevision, ChainConfig};
 use monad_consensus_types::block::AccountBalanceState;
 use monad_crypto::certificate_signature::{
-    CertificateSignaturePubKey, CertificateSignatureRecoverable,
+    CertificateSignaturePubKey, CertificateSignatureRecoverable, PubKey,
 };
 use monad_eth_block_policy::{
     nonce_usage::{NonceUsage, NonceUsageRetrievable},
     EthBlockPolicyBlockValidator, EthValidatedBlock,
 };
 use monad_eth_types::ValidatedTx;
+use monad_types::NodeId;
 use monad_validator::signature_collection::SignatureCollection;
 use rand::seq::SliceRandom;
 use tracing::{debug, error, trace};
@@ -41,13 +42,13 @@ use crate::pool::{
 };
 
 #[derive(Debug, PartialEq, Eq)]
-struct OrderedTx<'a> {
-    tx: &'a PoolTx,
+struct OrderedTx<'a, PT: PubKey> {
+    tx: &'a PoolTx<PT>,
     effective_tip_per_gas: u128,
 }
 
-impl<'a> OrderedTx<'a> {
-    fn new(tx: &'a PoolTx, base_fee: u64) -> Option<Self> {
+impl<'a, PT: PubKey> OrderedTx<'a, PT> {
+    fn new(tx: &'a PoolTx<PT>, base_fee: u64) -> Option<Self> {
         let effective_tip_per_gas = tx.raw().effective_tip_per_gas(base_fee)?;
 
         Some(Self {
@@ -57,13 +58,13 @@ impl<'a> OrderedTx<'a> {
     }
 }
 
-impl<'a> PartialOrd for OrderedTx<'a> {
+impl<PT: PubKey> PartialOrd for OrderedTx<'_, PT> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> Ord for OrderedTx<'a> {
+impl<PT: PubKey> Ord for OrderedTx<'_, PT> {
     fn cmp(&self, other: &Self) -> Ordering {
         (
             self.tx.tx_kind_priority(),
@@ -79,20 +80,20 @@ impl<'a> Ord for OrderedTx<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct OrderedTxGroup<'a> {
-    tx: OrderedTx<'a>,
+struct OrderedTxGroup<'a, PT: PubKey> {
+    tx: OrderedTx<'a, PT>,
     virtual_time: u64,
     address: &'a Address,
-    queued: VecDeque<OrderedTx<'a>>,
+    queued: VecDeque<OrderedTx<'a, PT>>,
 }
 
-impl PartialOrd for OrderedTxGroup<'_> {
+impl<PT: PubKey> PartialOrd for OrderedTxGroup<'_, PT> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for OrderedTxGroup<'_> {
+impl<PT: PubKey> Ord for OrderedTxGroup<'_, PT> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.tx
             .cmp(&other.tx)
@@ -100,14 +101,16 @@ impl Ord for OrderedTxGroup<'_> {
     }
 }
 
-pub struct ProposalSequencer<'a> {
-    heap: BinaryHeap<OrderedTxGroup<'a>>,
+pub struct ProposalSequencer<'a, PT: PubKey> {
+    heap: BinaryHeap<OrderedTxGroup<'a, PT>>,
     virtual_time: u64,
 }
 
-impl<'a> ProposalSequencer<'a> {
+pub(super) type SenderGasContributions<PT> = BTreeMap<NodeId<PT>, u64>;
+
+impl<'a, PT: PubKey> ProposalSequencer<'a, PT> {
     pub fn new<ST, SCT>(
-        tracked_txs: impl Iterator<Item = (&'a Address, &'a TrackedTxList)>,
+        tracked_txs: impl Iterator<Item = (&'a Address, &'a TrackedTxList<PT>)>,
         extending_blocks: &Vec<&EthValidatedBlock<ST, SCT>>,
         base_fee: u64,
         tx_limit: usize,
@@ -177,12 +180,13 @@ impl<'a> ProposalSequencer<'a> {
         chain_config: &CCT,
         mut account_balances: BTreeMap<&Address, AccountBalanceState>,
         validator: EthBlockPolicyBlockValidator<CRT>,
-    ) -> Proposal
+    ) -> (Proposal, SenderGasContributions<PT>)
     where
         CCT: ChainConfig<CRT>,
         CRT: ChainRevision,
     {
         let mut proposal = Proposal::default();
+        let mut sender_gas = SenderGasContributions::default();
 
         let mut authority_possible_nonce_deltas = BTreeMap::<Address, Vec<u64>>::default();
 
@@ -230,7 +234,7 @@ impl<'a> ProposalSequencer<'a> {
                 &mut account_balances,
                 &validator,
                 &mut proposal,
-                address,
+                &mut sender_gas,
                 tx.tx,
             ) {
                 if let Some(next_tx) = queued.pop_front() {
@@ -261,7 +265,7 @@ impl<'a> ProposalSequencer<'a> {
             }
         }
 
-        proposal
+        (proposal, sender_gas)
     }
 
     #[inline]
@@ -271,8 +275,8 @@ impl<'a> ProposalSequencer<'a> {
         account_balances: &mut BTreeMap<&Address, AccountBalanceState>,
         validator: &EthBlockPolicyBlockValidator<CRT>,
         proposal: &mut Proposal,
-        address: &Address,
-        tx: &PoolTx,
+        sender_gas: &mut SenderGasContributions<PT>,
+        tx: &PoolTx<PT>,
     ) -> bool {
         if proposal
             .total_gas
@@ -318,6 +322,9 @@ impl<'a> ProposalSequencer<'a> {
         proposal.total_gas += tx.gas_limit();
         proposal.total_size += tx_size;
         proposal.txs.push(tx.raw().to_owned());
+        if let Some(sender) = tx.forwarded_sender() {
+            *sender_gas.entry(sender).or_default() += tx.gas_limit();
+        }
 
         trace!(txn_hash = ?tx.hash(), "txn included in proposal");
 
@@ -325,7 +332,12 @@ impl<'a> ProposalSequencer<'a> {
     }
 
     #[inline]
-    fn push(&mut self, address: &'a Address, tx: OrderedTx<'a>, queued: VecDeque<OrderedTx<'a>>) {
+    fn push(
+        &mut self,
+        address: &'a Address,
+        tx: OrderedTx<'a, PT>,
+        queued: VecDeque<OrderedTx<'a, PT>>,
+    ) {
         assert_eq!(address, tx.tx.signer_ref());
 
         self.heap.push(OrderedTxGroup {

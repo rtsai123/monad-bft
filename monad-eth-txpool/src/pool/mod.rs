@@ -126,11 +126,61 @@ where
         state_backend: &SBT,
         chain_config: &CCT,
         txs: Vec<(Recovered<TxEnvelope>, PoolTxKind)>,
-        mut on_insert: impl FnMut(&PoolTx),
+        on_insert: impl FnMut(&PoolTx<CertificateSignaturePubKey<ST>>),
+    ) {
+        self.insert_txs_inner(
+            event_tracker,
+            block_policy,
+            state_backend,
+            chain_config,
+            txs.into_iter().map(|(tx, kind)| (tx, kind, None)).collect(),
+            on_insert,
+        );
+    }
+
+    pub fn insert_forwarded_txs(
+        &mut self,
+        event_tracker: &mut EthTxPoolEventTracker<'_>,
+        block_policy: &EthBlockPolicy<ST, SCT, CCT, CRT>,
+        state_backend: &SBT,
+        chain_config: &CCT,
+        txs: Vec<(
+            NodeId<CertificateSignaturePubKey<ST>>,
+            Recovered<TxEnvelope>,
+        )>,
+        on_insert: impl FnMut(&PoolTx<CertificateSignaturePubKey<ST>>),
+    ) {
+        let mut forwarded_txs = Vec::with_capacity(txs.len());
+        for (sender, tx) in txs {
+            forwarded_txs.push((tx, PoolTxKind::Forwarded, Some(sender)));
+        }
+
+        self.insert_txs_inner(
+            event_tracker,
+            block_policy,
+            state_backend,
+            chain_config,
+            forwarded_txs,
+            on_insert,
+        );
+    }
+
+    fn insert_txs_inner(
+        &mut self,
+        event_tracker: &mut EthTxPoolEventTracker<'_>,
+        block_policy: &EthBlockPolicy<ST, SCT, CCT, CRT>,
+        state_backend: &SBT,
+        chain_config: &CCT,
+        txs: Vec<(
+            Recovered<TxEnvelope>,
+            PoolTxKind,
+            Option<NodeId<CertificateSignaturePubKey<ST>>>,
+        )>,
+        mut on_insert: impl FnMut(&PoolTx<CertificateSignaturePubKey<ST>>),
     ) {
         let Some(last_commit) = self.last_commit.as_ref() else {
             event_tracker.drop_all(
-                txs.into_iter().map(|(tx, _)| tx),
+                txs.into_iter().map(|(tx, _, _)| tx),
                 EthTxPoolDropReason::PoolNotReady,
             );
             return;
@@ -140,17 +190,19 @@ where
         let execution_params = self.execution_revision.execution_chain_params();
 
         let (txs, invalid_txs): (Vec<_>, Vec<_>) =
-            txs.into_par_iter().partition_map(|(tx, kind)| {
-                Either::from(PoolTx::validate(
-                    last_commit,
-                    self.chain_id,
-                    chain_params,
-                    execution_params,
-                    tx,
-                    kind,
-                ))
-                .flip()
-            });
+            txs.into_par_iter()
+                .partition_map(|(tx, kind, forwarded_sender)| {
+                    Either::from(PoolTx::validate(
+                        last_commit,
+                        self.chain_id,
+                        chain_params,
+                        execution_params,
+                        tx,
+                        kind,
+                        forwarded_sender,
+                    ))
+                    .flip()
+                });
 
         for (tx, drop_reason) in invalid_txs {
             event_tracker.drop(*tx.tx_hash(), drop_reason);
@@ -162,7 +214,7 @@ where
         // the range at N-k+1.
         let block_seq_num = block_policy.get_last_commit() + SeqNum(1);
 
-        let account_balance_addresses = txs.iter().map(PoolTx::signer).collect_vec();
+        let account_balance_addresses = txs.iter().map(|tx| tx.signer()).collect_vec();
 
         let account_balances = match block_policy.compute_account_base_balances(
             block_seq_num,
@@ -178,7 +230,7 @@ where
                     "failed to insert transactions at account_balance lookups"
                 );
                 event_tracker.drop_all(
-                    txs.into_iter().map(PoolTx::into_raw),
+                    txs.into_iter().map(|tx| tx.into_raw()),
                     EthTxPoolDropReason::Internal(EthTxPoolInternalDropReason::StateBackendError),
                 );
                 return;
@@ -220,7 +272,7 @@ where
                     "failed to insert transactions at account_nonce lookups"
                 );
                 event_tracker.drop_all(
-                    txs.into_values().flatten().map(PoolTx::into_raw),
+                    txs.into_values().flatten().map(|tx| tx.into_raw()),
                     EthTxPoolDropReason::Internal(EthTxPoolInternalDropReason::StateBackendError),
                 );
                 return;
@@ -230,7 +282,7 @@ where
         for (address, txs) in txs {
             let Some(account_nonce) = account_nonces.remove(&address) else {
                 event_tracker.drop_all(
-                    txs.into_iter().map(PoolTx::into_raw),
+                    txs.into_iter().map(|tx| tx.into_raw()),
                     EthTxPoolDropReason::Internal(EthTxPoolInternalDropReason::StateBackendError),
                 );
                 continue;
@@ -268,7 +320,13 @@ where
         block_policy: &EthBlockPolicy<ST, SCT, CCT, CRT>,
         state_backend: &SBT,
         chain_config: &CCT,
-    ) -> Result<ProposedExecutionInputs<EthExecutionProtocol>, BlockPolicyError> {
+    ) -> Result<
+        (
+            ProposedExecutionInputs<EthExecutionProtocol>,
+            Vec<(NodeId<CertificateSignaturePubKey<ST>>, u64)>,
+        ),
+        BlockPolicyError,
+    > {
         info!(
             ?proposed_seq_num,
             ?tx_limit,
@@ -325,7 +383,7 @@ where
             .map(|tx| tx.length() as u64)
             .sum();
 
-        let user_transactions = self.sequence_user_transactions(
+        let (user_proposal, sender_gas) = self.sequence_user_transactions(
             event_tracker,
             proposed_seq_num,
             base_fee,
@@ -337,6 +395,7 @@ where
             state_backend,
             chain_config,
         )?;
+        let user_transactions = user_proposal.txs;
 
         let body = EthBlockBody {
             transactions: system_transactions
@@ -390,7 +449,10 @@ where
 
         self.update_aggregate_metrics(event_tracker);
 
-        Ok(ProposedExecutionInputs { header, body })
+        Ok((
+            ProposedExecutionInputs { header, body },
+            sender_gas.into_iter().collect_vec(),
+        ))
     }
 
     pub fn enter_round(
@@ -520,14 +582,14 @@ where
 
     pub fn generate_snapshot(&self) -> EthTxPoolSnapshot {
         EthTxPoolSnapshot {
-            txs: self.tracked.iter_txs().map(PoolTx::hash).collect(),
+            txs: self.tracked.iter_txs().map(|tx| tx.hash()).collect(),
         }
     }
 
     pub fn generate_sender_snapshot(&self) -> Vec<Address> {
         self.tracked
             .iter_txs()
-            .map(PoolTx::signer)
+            .map(|tx| tx.signer())
             .unique()
             .collect()
     }
@@ -584,7 +646,7 @@ where
             .collect_vec())
     }
 
-    pub fn sequence_user_transactions(
+    fn sequence_user_transactions(
         &mut self,
         event_tracker: &mut EthTxPoolEventTracker<'_>,
         proposed_seq_num: SeqNum,
@@ -596,14 +658,20 @@ where
         block_policy: &EthBlockPolicy<ST, SCT, CCT, CRT>,
         state_backend: &SBT,
         chain_config: &CCT,
-    ) -> Result<Vec<Recovered<TxEnvelope>>, BlockPolicyError> {
+    ) -> Result<
+        (
+            sequencer::Proposal,
+            sequencer::SenderGasContributions<CertificateSignaturePubKey<ST>>,
+        ),
+        BlockPolicyError,
+    > {
         let _timer = DropTimer::start(Duration::ZERO, |elapsed| {
             debug!(?elapsed, "txpool create_proposal");
         });
 
         let Some(last_commit) = self.last_commit.as_ref() else {
             error!("txpool create_proposal called before last committed block set");
-            return Ok(Vec::default());
+            return Ok((sequencer::Proposal::default(), Default::default()));
         };
 
         let last_commit_seq_num = last_commit.seq_num;
@@ -619,12 +687,12 @@ where
                 txpool_last_commit = last_commit_seq_num.0,
                 "txpool last commit update does not match block policy last commit"
             );
-            return Ok(Vec::default());
+            return Ok((sequencer::Proposal::default(), Default::default()));
         }
 
         if tx_limit == 0 {
             warn!("txpool create_proposal called with zero tx_limit");
-            return Ok(Vec::default());
+            return Ok((sequencer::Proposal::default(), Default::default()));
         }
 
         let sequencer =
@@ -632,7 +700,7 @@ where
         let sequencer_len = sequencer.len();
 
         if sequencer.is_empty() {
-            return Ok(Vec::default());
+            return Ok((sequencer::Proposal::default(), Default::default()));
         }
 
         let (account_balances, state_backend_lookups) = {
@@ -673,7 +741,7 @@ where
             &self.chain_revision,
         )?;
 
-        let proposal = sequencer.build_proposal(
+        let (proposal, sender_gas) = sequencer.build_proposal(
             tx_limit,
             proposal_gas_limit,
             proposal_byte_limit,
@@ -698,7 +766,7 @@ where
             "created proposal"
         );
 
-        Ok(proposal.txs)
+        Ok((proposal, sender_gas))
     }
 }
 
