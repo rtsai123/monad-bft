@@ -49,6 +49,7 @@ use monad_peer_discovery::{
     discovery::{PeerDiscovery, PeerDiscoveryBuilder},
     MonadNameRecord, NameRecord,
 };
+use monad_peer_score::{ema, StdClock};
 use monad_pprof::start_pprof_server;
 use monad_raptorcast::{
     auth::WireAuthProtocol,
@@ -158,6 +159,10 @@ async fn run(node_state: NodeState) -> Result<(), ()> {
         .qc()
         .get_round()
         + Round(1);
+    let (score_provider, score_reader) = ema::create::<
+        NodeId<CertificateSignaturePubKey<SignatureType>>,
+        StdClock,
+    >(node_state.node_config.peer_score.clone(), StdClock);
     let router = build_raptorcast_router::<
         SignatureType,
         SignatureCollectionType,
@@ -173,6 +178,7 @@ async fn run(node_state: NodeState) -> Result<(), ()> {
         current_epoch,
         current_round,
         node_state.persisted_peers_path,
+        score_reader.clone(),
     );
 
     let statesync_threshold: usize = node_state.node_config.statesync_threshold.into();
@@ -264,6 +270,8 @@ async fn run(node_state: NodeState) -> Result<(), ()> {
                 .get_round(),
             // TODO(andr-dev): Use timestamp from last commit in ledger
             0,
+            score_provider,
+            score_reader,
         )
         .expect("txpool ipc succeeds"),
         control_panel: ControlPanelIpcReceiver::new(
@@ -510,6 +518,7 @@ fn build_raptorcast_router<ST, SCT, M, OM>(
     current_epoch: Epoch,
     current_round: Round,
     persisted_peers_path: PathBuf,
+    direct_udp_peer_score_reader: monad_raptorcast::DirectUdpPeerScoreReader<ST>,
 ) -> MultiRouter<
     ST,
     M,
@@ -517,6 +526,7 @@ fn build_raptorcast_router<ST, SCT, M, OM>(
     MonadEvent<ST, SCT, ExecutionProtocolType>,
     PeerDiscovery<ST>,
     monad_raptorcast::auth::WireAuthProtocol,
+    monad_raptorcast::NodeDirectUdpPeerScore<ST>,
 >
 where
     ST: CertificateSignatureRecoverable<KeyPairType = monad_secp::KeyPair>,
@@ -738,6 +748,7 @@ where
         epoch_validators,
         auth_protocol,
         direct_udp_auth_protocol,
+        monad_raptorcast::node_direct_udp_peer_score::<ST>(direct_udp_peer_score_reader),
     )
 }
 

@@ -16,12 +16,14 @@
 use std::{hash::Hash, marker::PhantomData};
 
 use bytes::{BufMut, Bytes, BytesMut};
+use monad_crypto::certificate_signature::PubKey;
 use monad_executor::ExecutorMetricsChain;
 use monad_leanudp::{
     Config, DecodeError, DecodeOutcome, Decoder, EncodeError, Encoder, FragmentPolicy,
     IdentityScore, PacketHeader, SystemClock,
 };
 use monad_peer_score::PeerStatus;
+use monad_types::NodeId;
 use thiserror::Error;
 use zerocopy::IntoBytes;
 
@@ -47,6 +49,16 @@ pub struct PeerScoreAdapter<S> {
 }
 
 impl<S> PeerScoreAdapter<S> {
+    pub fn new(score_reader: S) -> Self {
+        Self { score_reader }
+    }
+}
+
+pub struct NodeIdScoreAdapter<S> {
+    score_reader: S,
+}
+
+impl<S> NodeIdScoreAdapter<S> {
     pub fn new(score_reader: S) -> Self {
         Self { score_reader }
     }
@@ -82,6 +94,18 @@ where
         } else {
             FragmentPolicy::Regular
         }
+    }
+}
+
+impl<N, S> monad_peer_score::IdentityScore for NodeIdScoreAdapter<S>
+where
+    N: PubKey,
+    S: monad_peer_score::IdentityScore<Identity = NodeId<N>>,
+{
+    type Identity = N;
+
+    fn score(&self, identity: &Self::Identity) -> PeerStatus {
+        self.score_reader.score(&NodeId::new(*identity))
     }
 }
 

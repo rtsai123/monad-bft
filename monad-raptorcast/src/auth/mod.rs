@@ -18,7 +18,9 @@ pub mod metrics;
 pub mod protocol;
 pub mod socket;
 
-pub use framing::{AuthPacketFramer, LeanUdpFramer, LeanUdpFramingError, NopScore};
+pub use framing::{
+    AuthPacketFramer, LeanUdpFramer, LeanUdpFramingError, NodeIdScoreAdapter, NopScore,
+};
 pub use metrics::{
     GAUGE_RAPTORCAST_AUTH_AUTHENTICATED_UDP_BYTES_READ,
     GAUGE_RAPTORCAST_AUTH_AUTHENTICATED_UDP_BYTES_WRITTEN,

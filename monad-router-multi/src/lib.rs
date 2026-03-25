@@ -53,15 +53,16 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 pub use tracing::{debug, error, info, warn, Level};
 
 //==============================================================================
-pub struct MultiRouter<ST, M, OM, SE, PD, AP>
+pub struct MultiRouter<ST, M, OM, SE, PD, AP, DS>
 where
     ST: CertificateSignatureRecoverable,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
     OM: Encodable + Into<M> + Clone,
     PD: PeerDiscoveryAlgo<SignatureType = ST>,
     AP: AuthenticationProtocol<PublicKey = CertificateSignaturePubKey<ST>>,
+    DS: monad_peer_score::IdentityScore<Identity = CertificateSignaturePubKey<ST>>,
 {
-    rc_primary: RaptorCast<ST, M, OM, SE, PD, AP>,
+    rc_primary: RaptorCast<ST, M, OM, SE, PD, AP, DS>,
     rc_secondary: Option<RaptorCastSecondary<ST, M, OM, SE, PD>>,
 
     // raptorcast config is stored for future role change
@@ -75,13 +76,14 @@ where
     phantom: PhantomData<(OM, SE)>,
 }
 
-impl<ST, M, OM, SE, PD, AP> MultiRouter<ST, M, OM, SE, PD, AP>
+impl<ST, M, OM, SE, PD, AP, DS> MultiRouter<ST, M, OM, SE, PD, AP, DS>
 where
     ST: CertificateSignatureRecoverable,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
     OM: Encodable + Into<M> + Clone,
     PD: PeerDiscoveryAlgo<SignatureType = ST>,
     AP: AuthenticationProtocol<PublicKey = CertificateSignaturePubKey<ST>>,
+    DS: monad_peer_score::IdentityScore<Identity = CertificateSignaturePubKey<ST>>,
 {
     pub fn new<B>(
         self_node_id: NodeId<CertificateSignaturePubKey<ST>>,
@@ -92,6 +94,7 @@ where
         epoch_validators: BTreeMap<Epoch, BTreeSet<NodeId<CertificateSignaturePubKey<ST>>>>,
         auth_protocol: AP,
         direct_udp_auth_protocol: Option<AP>,
+        direct_udp_peer_score: DS,
     ) -> Self
     where
         B: PeerDiscoveryAlgoBuilder<PeerDiscoveryAlgoType = PD>,
@@ -162,6 +165,7 @@ where
             current_epoch,
             auth_protocol,
             direct_udp_auth_protocol,
+            direct_udp_peer_score,
         );
         rc_primary.bind_channel_to_secondary_raptorcast(
             secondary_mode,
@@ -296,14 +300,15 @@ where
 }
 
 //==============================================================================
-impl<ST, M, OM, SE, PD, AP> Executor for MultiRouter<ST, M, OM, SE, PD, AP>
+impl<ST, M, OM, SE, PD, AP, DS> Executor for MultiRouter<ST, M, OM, SE, PD, AP, DS>
 where
     ST: CertificateSignatureRecoverable,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
     OM: Encodable + Into<M> + Clone,
     PD: PeerDiscoveryAlgo<SignatureType = ST>,
     AP: AuthenticationProtocol<PublicKey = CertificateSignaturePubKey<ST>>,
-    RaptorCast<ST, M, OM, SE, PD, AP>: Unpin,
+    DS: monad_peer_score::IdentityScore<Identity = CertificateSignaturePubKey<ST>>,
+    RaptorCast<ST, M, OM, SE, PD, AP, DS>: Unpin,
 {
     type Command = RouterCommand<ST, OM>;
 
@@ -458,7 +463,7 @@ where
 }
 
 //==============================================================================
-impl<ST, M, OM, E, PD, AP> Stream for MultiRouter<ST, M, OM, E, PD, AP>
+impl<ST, M, OM, E, PD, AP, DS> Stream for MultiRouter<ST, M, OM, E, PD, AP, DS>
 where
     ST: CertificateSignatureRecoverable,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
@@ -466,7 +471,8 @@ where
     E: From<RaptorCastEvent<M::Event, ST>>,
     Self: Unpin,
     AP: AuthenticationProtocol<PublicKey = CertificateSignaturePubKey<ST>>,
-    RaptorCast<ST, M, OM, E, PD, AP>: Unpin,
+    DS: monad_peer_score::IdentityScore<Identity = CertificateSignaturePubKey<ST>>,
+    RaptorCast<ST, M, OM, E, PD, AP, DS>: Unpin,
     RaptorCastSecondary<ST, M, OM, E, PD>: Unpin,
     PD: PeerDiscoveryAlgo<SignatureType = ST>,
     PeerDiscoveryDriver<PD>: Unpin,

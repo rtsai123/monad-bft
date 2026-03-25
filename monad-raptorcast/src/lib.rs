@@ -53,6 +53,7 @@ use monad_peer_discovery::{
     mock::{NopDiscovery, NopDiscoveryBuilder},
     NameRecord, PeerDiscoveryAlgo, PeerDiscoveryEvent,
 };
+use monad_peer_score::{ema, StdClock};
 use monad_types::{DropTimer, Epoch, ExecutionProtocol, NodeId, Round, RouterTarget, UdpPriority};
 use monad_validator::{
     signature_collection::SignatureCollection,
@@ -98,21 +99,38 @@ const TX_FORWARD_DIRECT_UDP_MAX_MESSAGE_SIZE_BYTES: usize = 512 * 1024;
 pub const UNICAST_MSG_BATCH_SIZE: usize = 32;
 
 pub(crate) type OwnedMessageBuilder<ST> = packet::MessageBuilder<'static, ST>;
-type DirectUdpTransport<ST, AP> = auth::FramedAuthenticatedSocketHandle<
+pub type DirectUdpPeerScoreReader<ST> =
+    ema::ScoreReader<NodeId<CertificateSignaturePubKey<ST>>, StdClock>;
+pub type NodeDirectUdpPeerScore<ST> = auth::NodeIdScoreAdapter<DirectUdpPeerScoreReader<ST>>;
+type DirectUdpTransport<ST, AP, DS> = auth::FramedAuthenticatedSocketHandle<
     AP,
-    auth::LeanUdpFramer<
-        CertificateSignaturePubKey<ST>,
-        auth::NopScore<CertificateSignaturePubKey<ST>>,
-    >,
+    auth::LeanUdpFramer<CertificateSignaturePubKey<ST>, DS>,
 >;
 
-pub struct RaptorCast<ST, M, OM, SE, PD, AP>
+pub fn node_direct_udp_peer_score<ST>(
+    score_reader: DirectUdpPeerScoreReader<ST>,
+) -> NodeDirectUdpPeerScore<ST>
+where
+    ST: CertificateSignatureRecoverable,
+{
+    auth::NodeIdScoreAdapter::new(score_reader)
+}
+
+pub fn default_direct_udp_peer_score<ST>() -> auth::NopScore<CertificateSignaturePubKey<ST>>
+where
+    ST: CertificateSignatureRecoverable,
+{
+    auth::NopScore::new()
+}
+
+pub struct RaptorCast<ST, M, OM, SE, PD, AP, DS>
 where
     ST: CertificateSignatureRecoverable,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
     OM: Encodable + Into<M> + Clone,
     PD: PeerDiscoveryAlgo<SignatureType = ST>,
     AP: auth::AuthenticationProtocol<PublicKey = CertificateSignaturePubKey<ST>>,
+    DS: monad_peer_score::IdentityScore<Identity = CertificateSignaturePubKey<ST>>,
 {
     signing_key: Arc<ST::KeyPairType>,
     is_dynamic_fullnode: bool,
@@ -132,7 +150,7 @@ where
     tcp_reader: TcpSocketReader,
     tcp_writer: TcpSocketWriter,
     dual_socket: auth::DualSocketHandle<AP>,
-    direct_udp_transport: Option<DirectUdpTransport<ST, AP>>,
+    direct_udp_transport: Option<DirectUdpTransport<ST, AP, DS>>,
     dataplane_control: DataplaneControl,
     pending_events: VecDeque<RaptorCastEvent<M::Event, ST>>,
 
@@ -159,13 +177,14 @@ pub enum RaptorCastEvent<E, ST: CertificateSignatureRecoverable> {
     SecondaryRaptorcastPeersUpdate(Round, Vec<NodeId<CertificateSignaturePubKey<ST>>>),
 }
 
-impl<ST, M, OM, SE, PD, AP> RaptorCast<ST, M, OM, SE, PD, AP>
+impl<ST, M, OM, SE, PD, AP, DS> RaptorCast<ST, M, OM, SE, PD, AP, DS>
 where
     ST: CertificateSignatureRecoverable,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
     OM: Encodable + Into<M> + Clone,
     PD: PeerDiscoveryAlgo<SignatureType = ST>,
     AP: auth::AuthenticationProtocol<PublicKey = CertificateSignaturePubKey<ST>>,
+    DS: monad_peer_score::IdentityScore<Identity = CertificateSignaturePubKey<ST>>,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -180,6 +199,7 @@ where
         current_epoch: Epoch,
         auth_protocol: AP,
         direct_udp_auth_protocol: Option<AP>,
+        direct_udp_peer_score: DS,
     ) -> Self {
         let (tcp_reader, tcp_writer) = tcp_socket.split();
 
@@ -229,7 +249,7 @@ where
                 let socket = auth::AuthenticatedSocketHandle::new(socket, protocol);
                 Some(auth::FramedAuthenticatedSocketHandle::new(
                     socket,
-                    auth::LeanUdpFramer::new(auth::NopScore::new(), leanudp_config),
+                    auth::LeanUdpFramer::new(direct_udp_peer_score, leanudp_config),
                 ))
             }
             (None, None) => None,
@@ -771,6 +791,7 @@ pub fn new_defaulted_raptorcast_for_tests<ST, M, OM, SE>(
     SE,
     NopDiscovery<ST>,
     auth::NoopAuthProtocol<CertificateSignaturePubKey<ST>>,
+    auth::NopScore<CertificateSignaturePubKey<ST>>,
 >
 where
     ST: CertificateSignatureRecoverable,
@@ -807,7 +828,7 @@ where
     let pd = PeerDiscoveryDriver::new(peer_discovery_builder);
     let shared_pd = Arc::new(Mutex::new(pd));
     let auth_protocol = auth::NoopAuthProtocol::new();
-    RaptorCast::<ST, M, OM, SE, NopDiscovery<ST>, _>::new(
+    RaptorCast::<ST, M, OM, SE, NopDiscovery<ST>, _, _>::new(
         config,
         SecondaryRaptorCastModeConfig::None,
         dataplane.tcp_socket,
@@ -819,6 +840,7 @@ where
         Epoch(0),
         auth_protocol,
         None,
+        default_direct_udp_peer_score::<ST>(),
     )
 }
 
@@ -826,7 +848,15 @@ pub fn new_wireauth_raptorcast_for_tests<ST, M, OM, SE>(
     dataplane: DataplaneHandles,
     known_addresses: HashMap<NodeId<CertificateSignaturePubKey<ST>>, SocketAddrV4>,
     shared_key: Arc<ST::KeyPairType>,
-) -> RaptorCast<ST, M, OM, SE, NopDiscovery<ST>, auth::WireAuthProtocol>
+) -> RaptorCast<
+    ST,
+    M,
+    OM,
+    SE,
+    NopDiscovery<ST>,
+    auth::WireAuthProtocol,
+    auth::NopScore<CertificateSignaturePubKey<ST>>,
+>
 where
     ST: CertificateSignatureRecoverable<KeyPairType = monad_secp::KeyPair>,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
@@ -864,7 +894,7 @@ where
     let wireauth_config = monad_wireauth::Config::default();
     let auth_protocol =
         auth::WireAuthProtocol::new(&auth::metrics::UDP_METRICS, wireauth_config, shared_key);
-    RaptorCast::<ST, M, OM, SE, NopDiscovery<ST>, _>::new(
+    RaptorCast::<ST, M, OM, SE, NopDiscovery<ST>, _, _>::new(
         config,
         SecondaryRaptorCastModeConfig::None,
         dataplane.tcp_socket,
@@ -876,16 +906,18 @@ where
         Epoch(0),
         auth_protocol,
         None,
+        default_direct_udp_peer_score::<ST>(),
     )
 }
 
-impl<ST, M, OM, SE, PD, AP> Executor for RaptorCast<ST, M, OM, SE, PD, AP>
+impl<ST, M, OM, SE, PD, AP, DS> Executor for RaptorCast<ST, M, OM, SE, PD, AP, DS>
 where
     ST: CertificateSignatureRecoverable,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
     OM: Encodable + Into<M> + Clone,
     PD: PeerDiscoveryAlgo<SignatureType = ST>,
     AP: auth::AuthenticationProtocol<PublicKey = CertificateSignaturePubKey<ST>>,
+    DS: monad_peer_score::IdentityScore<Identity = CertificateSignaturePubKey<ST>>,
 {
     type Command = RouterCommand<ST, OM>;
 
@@ -1117,7 +1149,7 @@ fn iter_ips<'a, ST: CertificateSignatureRecoverable, PD: PeerDiscoveryAlgo<Signa
         .map(|socket| socket.ip())
 }
 
-impl<ST, M, OM, E, PD, AP> Stream for RaptorCast<ST, M, OM, E, PD, AP>
+impl<ST, M, OM, E, PD, AP, DS> Stream for RaptorCast<ST, M, OM, E, PD, AP, DS>
 where
     ST: CertificateSignatureRecoverable,
     M: Message<NodeIdPubKey = CertificateSignaturePubKey<ST>> + Decodable,
@@ -1125,6 +1157,7 @@ where
     E: From<RaptorCastEvent<M::Event, ST>>,
     PD: PeerDiscoveryAlgo<SignatureType = ST>,
     AP: auth::AuthenticationProtocol<PublicKey = CertificateSignaturePubKey<ST>>,
+    DS: monad_peer_score::IdentityScore<Identity = CertificateSignaturePubKey<ST>>,
     PeerDiscoveryDriver<PD>: Unpin,
     Self: Unpin,
 {
@@ -1399,7 +1432,7 @@ where
 
         {
             let send_peer_disc_msg =
-                |this: &mut RaptorCast<ST, M, OM, E, PD, AP>,
+                |this: &mut RaptorCast<ST, M, OM, E, PD, AP, DS>,
                  target: NodeId<CertificateSignaturePubKey<ST>>,
                  target_name_record: Option<NameRecord>,
                  message: PeerDiscoveryMessage<ST>| {

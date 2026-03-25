@@ -526,6 +526,7 @@ struct NodeSetup {
         <MockMessage as Message>::Event,
         NopDiscovery<SignatureType>,
         monad_raptorcast::auth::WireAuthProtocol,
+        monad_raptorcast::auth::NopScore<CertificateSignaturePubKey<SignatureType>>,
     >,
     node_id: NodeId<CertificateSignaturePubKey<SignatureType>>,
     tcp_addr: SocketAddrV4,
@@ -661,6 +662,7 @@ fn setup_node(
         <MockMessage as Message>::Event,
         NopDiscovery<SignatureType>,
         monad_raptorcast::auth::WireAuthProtocol,
+        _,
     >::new(
         create_raptorcast_config(keypair_arc),
         SecondaryRaptorCastModeConfig::None,
@@ -673,6 +675,7 @@ fn setup_node(
         Epoch(0),
         auth_protocol,
         None,
+        monad_raptorcast::default_direct_udp_peer_score::<SignatureType>(),
     );
 
     raptorcast.exec(vec![RouterCommand::AddEpochValidatorSet {

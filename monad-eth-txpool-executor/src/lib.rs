@@ -62,6 +62,9 @@ pub use self::{
 };
 use crate::forward::INGRESS_CHUNK_INTERVAL_MS;
 
+type PeerScoreProvider<ST> = ema::ScoreProvider<NodeId<CertificateSignaturePubKey<ST>>, StdClock>;
+type PeerScoreReader<ST> = ema::ScoreReader<NodeId<CertificateSignaturePubKey<ST>>, StdClock>;
+
 mod client;
 pub mod forward;
 mod ipc;
@@ -118,6 +121,8 @@ where
         chain_config: CCT,
         round: Round,
         execution_timestamp_s: u64,
+        score_provider: PeerScoreProvider<ST>,
+        score_reader: PeerScoreReader<ST>,
     ) -> io::Result<EthTxPoolExecutorClient<ST, SCT, SBT, CCT, CRT>> {
         let ipc = Box::pin(EthTxPoolIpcServer::new(ipc_config)?);
 
@@ -125,10 +130,6 @@ where
 
         let metrics = Arc::new(EthTxPoolExecutorMetrics::default());
         let mut executor_metrics = ExecutorMetrics::default();
-        let (score_provider, score_reader) = ema::create::<
-            NodeId<CertificateSignaturePubKey<ST>>,
-            StdClock,
-        >(ema::ScoreConfig::default(), StdClock);
 
         metrics.update(&mut executor_metrics);
 

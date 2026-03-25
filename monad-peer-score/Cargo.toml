@@ -9,6 +9,7 @@ test-utils = []
 [dependencies]
 lru = { workspace = true }
 monad-executor = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

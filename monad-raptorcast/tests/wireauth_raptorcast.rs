@@ -248,6 +248,7 @@ fn spawn_noop_validator(
             MockEvent<CertificateSignaturePubKey<SecpSignature>>,
             monad_peer_discovery::mock::NopDiscovery<SecpSignature>,
             _,
+            _,
         >::new(
             config,
             monad_raptorcast::raptorcast_secondary::SecondaryRaptorCastModeConfig::None,
@@ -260,6 +261,7 @@ fn spawn_noop_validator(
             Epoch(0),
             auth_protocol,
             None,
+            monad_raptorcast::default_direct_udp_peer_score::<SecpSignature>(),
         );
 
         let mut cmd_rx = cmd_rx;
@@ -328,6 +330,7 @@ fn spawn_wireauth_validator(
             MockEvent<CertificateSignaturePubKey<SecpSignature>>,
             monad_peer_discovery::mock::NopDiscovery<SecpSignature>,
             _,
+            _,
         >::new(
             config,
             monad_raptorcast::raptorcast_secondary::SecondaryRaptorCastModeConfig::None,
@@ -340,6 +343,7 @@ fn spawn_wireauth_validator(
             Epoch(0),
             auth_protocol,
             direct_udp_auth_protocol,
+            monad_raptorcast::default_direct_udp_peer_score::<SecpSignature>(),
         );
 
         let mut cmd_rx = cmd_rx;

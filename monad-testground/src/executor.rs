@@ -188,6 +188,7 @@ where
                     MonadEvent<ST, SCT, MockExecutionProtocol>,
                     NopDiscovery<ST>,
                     NoopAuthProtocol<CertificateSignaturePubKey<ST>>,
+                    _,
                 >::new(
                     cfg,
                     SecondaryRaptorCastModeConfig::None,
@@ -200,6 +201,7 @@ where
                     Epoch(0),
                     auth_protocol,
                     None,
+                    monad_raptorcast::default_direct_udp_peer_score::<ST>(),
                 ))
             }
         },
