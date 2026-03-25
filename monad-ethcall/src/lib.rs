@@ -20,7 +20,7 @@ use std::{
 };
 
 use alloy_consensus::{Header, Transaction as _, TxEnvelope};
-use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::{eip2718::Encodable2718, eip4895::Withdrawal};
 use alloy_primitives::{Address, Bytes, B256, U256, U64};
 use alloy_rlp::{encode_iter, encode_list, Encodable};
 use alloy_sol_types::decode_revert_reason;
@@ -628,6 +628,8 @@ pub struct BlockOverride {
     pub base_fee_per_gas: Option<U256>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_base_fee: Option<U256>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withdrawals: Vec<Withdrawal>,
 }
 
 pub async fn eth_simulate_v1(
@@ -735,6 +737,20 @@ pub async fn eth_simulate_v1(
                         override_ctx,
                         blob_base_fee_vec.as_ptr(),
                         blob_base_fee_vec.len(),
+                    );
+                }
+            }
+
+            for withdrawal in &block_override.withdrawals {
+                let address_bytes: &[u8] = withdrawal.address.as_slice();
+                unsafe {
+                    bindings::add_block_override_withdrawal(
+                        override_ctx,
+                        withdrawal.index,
+                        withdrawal.validator_index,
+                        withdrawal.amount,
+                        address_bytes.as_ptr(),
+                        address_bytes.len(),
                     );
                 }
             }
