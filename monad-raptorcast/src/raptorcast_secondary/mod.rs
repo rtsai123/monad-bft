@@ -451,6 +451,12 @@ where
                                 PrepareGroupResponse message"
                         );
                     }
+                    FullNodesGroupMessage::ParticipationReport(_) => {
+                        error!(
+                            "RaptorCastSecondary client received a \
+                                ParticipationReport message"
+                        );
+                    }
                     FullNodesGroupMessage::ConfirmGroup(confirm_msg) => {
                         let is_valid = client.handle_confirm_group_message(confirm_msg.clone());
                         if is_valid {

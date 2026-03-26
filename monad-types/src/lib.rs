@@ -133,7 +133,7 @@ impl FromStr for Round {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, RlpEncodable, RlpDecodable)]
 // A non-empty span of rounds
 pub struct RoundSpan {
     pub start: Round, // inclusive
