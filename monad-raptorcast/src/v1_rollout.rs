@@ -17,7 +17,7 @@ use crate::{
 //                   |  publish v0      |  publish v1      |
 
 pub const CURRENT_STAGE: DeterministicProtocolRolloutStage =
-    DeterministicProtocolRolloutStage::AcceptBothPublishV1;
+    DeterministicProtocolRolloutStage::AlwaysV1;
 
 #[derive(Debug, Clone, Copy)]
 pub enum DeterministicProtocolRolloutStage {
