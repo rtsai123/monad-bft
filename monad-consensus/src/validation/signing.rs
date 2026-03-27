@@ -414,18 +414,14 @@ where
         LT: LeaderElection<NodeIdPubKey = CertificateSignaturePubKey<ST>>,
     {
         if let Some(tc) = &self.last_round_tc {
-            verify_tc(
-                cert_cache,
-                &|epoch, round| {
-                    epoch_to_validators(epoch_manager, val_epoch_map, election, epoch, round)
-                },
-                tc,
-            )?;
             // last_round_tc must be from the previous round
             if self.proposal_round != tc.round + Round(1) {
                 return Err(Error::NotWellFormed);
             }
         }
+
+        self.well_formed_proposal()?;
+        self.verify_epoch(epoch_manager)?;
 
         verify_tip(
             cert_cache,
@@ -435,8 +431,15 @@ where
             &self.tip,
         )?;
 
-        self.well_formed_proposal()?;
-        self.verify_epoch(epoch_manager)?;
+        if let Some(tc) = &self.last_round_tc {
+            verify_tc(
+                cert_cache,
+                &|epoch, round| {
+                    epoch_to_validators(epoch_manager, val_epoch_map, election, epoch, round)
+                },
+                tc,
+            )?;
+        }
 
         Ok(())
     }
@@ -549,6 +552,19 @@ where
             return Err(Error::InvalidSignature);
         }
 
+        self.well_formed_timeout()?;
+        self.verify_epoch(epoch_manager)?;
+
+        if let Some(round_certificate) = &timeout.last_round_certificate {
+            // last_round_certificate must be from the previous round
+            if timeout.tminfo.round != round_certificate.round() + Round(1) {
+                return Err(Error::NotWellFormed);
+            }
+        }
+        if timeout.high_extend.rank() != timeout.tminfo.rank() {
+            return Err(Error::NotWellFormed);
+        }
+
         if let Some(round_certificate) = &timeout.last_round_certificate {
             match round_certificate {
                 RoundCertificate::Tc(tc) => {
@@ -582,10 +598,6 @@ where
                     )?;
                 }
             }
-            // last_round_certificate must be from the previous round
-            if timeout.tminfo.round != round_certificate.round() + Round(1) {
-                return Err(Error::NotWellFormed);
-            }
         }
         verify_high_extend(
             cert_cache,
@@ -594,12 +606,6 @@ where
             },
             &timeout.high_extend.clone().into(),
         )?;
-        if timeout.high_extend.rank() != timeout.tminfo.rank() {
-            return Err(Error::NotWellFormed);
-        }
-
-        self.well_formed_timeout()?;
-        self.verify_epoch(epoch_manager)?;
 
         Ok(())
     }
@@ -651,6 +657,9 @@ where
         VT: ValidatorSetType<NodeIdPubKey = SCT::NodeIdPubKey>,
         LT: LeaderElection<NodeIdPubKey = SCT::NodeIdPubKey>,
     {
+        self.well_formed_round_recovery()?;
+        self.verify_epoch(epoch_manager)?;
+
         verify_tc(
             cert_cache,
             &|epoch, round| {
@@ -658,9 +667,6 @@ where
             },
             &self.tc,
         )?;
-
-        self.well_formed_round_recovery()?;
-        self.verify_epoch(epoch_manager)?;
 
         Ok(())
     }
@@ -1657,7 +1663,7 @@ mod test {
 
         let vote = Vote {
             id: BlockId(Hash([0x00_u8; 32])),
-            round: Round(3),
+            round: Round(2),
             ..DontCare::dont_care()
         };
 
