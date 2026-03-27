@@ -124,6 +124,26 @@ pub struct Unverified<S, M> {
     author_signature: S,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsensusProtocolMessageKind {
+    Proposal,
+    Vote,
+    Timeout,
+    RoundRecovery,
+    NoEndorsement,
+    AdvanceRound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OldDroppableConsensusMessage {
+    Vote,
+    Timeout,
+    RoundRecovery,
+    NoEndorsement,
+    AdvanceRoundQc,
+    AdvanceRoundTc,
+}
+
 impl<S: CertificateSignatureRecoverable, M> Unverified<S, M> {
     pub fn new(obj: M, signature: S) -> Self {
         Self {
@@ -145,7 +165,43 @@ where
     EPT: ExecutionProtocol,
 {
     pub fn is_proposal(&self) -> bool {
-        matches!(&self.obj.obj.message, ProtocolMessage::Proposal(_))
+        self.protocol_message_kind() == ConsensusProtocolMessageKind::Proposal
+    }
+
+    pub fn protocol_message_kind(&self) -> ConsensusProtocolMessageKind {
+        match &self.obj.obj.message {
+            ProtocolMessage::Proposal(_) => ConsensusProtocolMessageKind::Proposal,
+            ProtocolMessage::Vote(_) => ConsensusProtocolMessageKind::Vote,
+            ProtocolMessage::Timeout(_) => ConsensusProtocolMessageKind::Timeout,
+            ProtocolMessage::RoundRecovery(_) => ConsensusProtocolMessageKind::RoundRecovery,
+            ProtocolMessage::NoEndorsement(_) => ConsensusProtocolMessageKind::NoEndorsement,
+            ProtocolMessage::AdvanceRound(_) => ConsensusProtocolMessageKind::AdvanceRound,
+        }
+    }
+
+    pub fn top_level_round(&self) -> Round {
+        self.obj.obj.get_round()
+    }
+
+    pub fn old_droppable_protocol_message(
+        &self,
+        current_round: Round,
+    ) -> Option<OldDroppableConsensusMessage> {
+        if self.top_level_round() >= current_round {
+            return None;
+        }
+
+        match &self.obj.obj.message {
+            ProtocolMessage::Proposal(_) => None,
+            ProtocolMessage::Vote(_) => Some(OldDroppableConsensusMessage::Vote),
+            ProtocolMessage::Timeout(_) => Some(OldDroppableConsensusMessage::Timeout),
+            ProtocolMessage::RoundRecovery(_) => Some(OldDroppableConsensusMessage::RoundRecovery),
+            ProtocolMessage::NoEndorsement(_) => Some(OldDroppableConsensusMessage::NoEndorsement),
+            ProtocolMessage::AdvanceRound(msg) => Some(match msg.last_round_certificate {
+                RoundCertificate::Qc(_) => OldDroppableConsensusMessage::AdvanceRoundQc,
+                RoundCertificate::Tc(_) => OldDroppableConsensusMessage::AdvanceRoundTc,
+            }),
+        }
     }
 }
 

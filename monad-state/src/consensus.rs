@@ -23,7 +23,7 @@ use monad_consensus::{
     },
     validation::{
         certificate_cache::CertificateCache,
-        signing::{Unvalidated, Unverified, Validated, Verified},
+        signing::{OldDroppableConsensusMessage, Unvalidated, Unverified, Validated, Verified},
     },
 };
 use monad_consensus_state::{command::ConsensusCommand, ConsensusConfig, ConsensusStateWrapper};
@@ -57,6 +57,44 @@ use crate::{
     handle_validation_error, BlockTimestamp, ConsensusMode, MonadState, MonadVersion, Role,
     VerifiedMonadMessage,
 };
+
+fn prefilter_old_consensus_message<ST, SCT, EPT>(
+    metrics: &mut Metrics,
+    current_round: Round,
+    message: &Unverified<ST, Unvalidated<ConsensusMessage<ST, SCT, EPT>>>,
+) -> bool
+where
+    ST: CertificateSignatureRecoverable,
+    SCT: SignatureCollection<NodeIdPubKey = CertificateSignaturePubKey<ST>>,
+    EPT: ExecutionProtocol,
+{
+    let Some(old_message) = message.old_droppable_protocol_message(current_round) else {
+        return false;
+    };
+
+    match old_message {
+        OldDroppableConsensusMessage::Vote => {
+            metrics.consensus_events.old_vote_received += 1;
+        }
+        OldDroppableConsensusMessage::Timeout => {
+            metrics.consensus_events.old_remote_timeout += 1;
+        }
+        OldDroppableConsensusMessage::RoundRecovery => {
+            metrics.consensus_events.process_old_tc += 1;
+        }
+        OldDroppableConsensusMessage::NoEndorsement => {
+            metrics.consensus_events.old_no_endorsement_received += 1;
+        }
+        OldDroppableConsensusMessage::AdvanceRoundQc => {
+            metrics.consensus_events.process_old_qc += 1;
+        }
+        OldDroppableConsensusMessage::AdvanceRoundTc => {
+            metrics.consensus_events.process_old_tc += 1;
+        }
+    }
+
+    true
+}
 
 pub(super) struct ConsensusChildState<'a, ST, SCT, EPT, BPT, SBT, VTF, LT, BVT, CCT, CRT>
 where
@@ -138,6 +176,7 @@ where
         &mut self,
         event: ConsensusEvent<ST, SCT, EPT>,
     ) -> Vec<WrappedConsensusCommand<ST, SCT, EPT, BPT, SBT, CCT, CRT>> {
+        let current_round = self.consensus.current_round();
         let live = match self.consensus {
             ConsensusMode::Live(live) => live,
             ConsensusMode::Sync {
@@ -151,6 +190,16 @@ where
                     unverified_message,
                 } = event.clone()
                 {
+                    if prefilter_old_consensus_message(
+                        self.metrics,
+                        current_round,
+                        &unverified_message,
+                    ) {
+                        tracing::trace!(?sender, ?current_round, "dropping old consensus message");
+                        tracing::trace!(?event, "ignoring old ConsensusEvent while syncing");
+                        return cmds;
+                    }
+
                     // skip evidence collection in sync mode
                     if let Ok(verified_message) = Self::verify_and_validate_consensus_message(
                         self.certificate_cache,
@@ -218,55 +267,63 @@ where
                 sender,
                 unverified_message,
             } => {
-                match Self::verify_and_validate_consensus_message(
-                    self.certificate_cache,
-                    consensus.epoch_manager,
-                    consensus.val_epoch_map,
-                    consensus.election,
-                    self.version,
+                if prefilter_old_consensus_message(
                     consensus.metrics,
-                    sender,
-                    unverified_message,
+                    current_round,
+                    &unverified_message,
                 ) {
-                    Ok(verified_message) => {
-                        let (author, protocol_message) = verified_message.clone().into_inner();
-                        match protocol_message {
-                            ProtocolMessage::Proposal(msg) => {
-                                let proposal_epoch = msg.proposal_epoch;
-                                let proposal_round = msg.proposal_round;
-                                let mut proposal_cmds =
-                                    consensus.handle_proposal_message(author, msg);
-                                // TODO:Maybe we could skip the below command if we could somehow determine that
-                                // the peer isn't publishing to full nodes at the moment?
-                                //
-                                // send verified_message carrying author signature
-                                proposal_cmds.push(ConsensusCommand::PublishToFullNodes {
-                                    epoch: proposal_epoch,
-                                    round: proposal_round,
-                                    message: verified_message,
-                                });
-                                proposal_cmds
-                            }
-                            ProtocolMessage::Vote(msg) => {
-                                consensus.handle_vote_message(author, msg)
-                            }
-                            ProtocolMessage::Timeout(msg) => {
-                                consensus.handle_timeout_message(author, msg)
-                            }
-                            ProtocolMessage::RoundRecovery(msg) => {
-                                consensus.handle_round_recovery_message(author, msg)
-                            }
-                            ProtocolMessage::NoEndorsement(msg) => {
-                                consensus.handle_no_endorsement_message(author, msg)
-                            }
-                            ProtocolMessage::AdvanceRound(msg) => {
-                                consensus.handle_advance_round_message(author, msg)
+                    Vec::new()
+                } else {
+                    match Self::verify_and_validate_consensus_message(
+                        self.certificate_cache,
+                        consensus.epoch_manager,
+                        consensus.val_epoch_map,
+                        consensus.election,
+                        self.version,
+                        consensus.metrics,
+                        sender,
+                        unverified_message,
+                    ) {
+                        Ok(verified_message) => {
+                            let (author, protocol_message) = verified_message.clone().into_inner();
+                            match protocol_message {
+                                ProtocolMessage::Proposal(msg) => {
+                                    let proposal_epoch = msg.proposal_epoch;
+                                    let proposal_round = msg.proposal_round;
+                                    let mut proposal_cmds =
+                                        consensus.handle_proposal_message(author, msg);
+                                    // TODO:Maybe we could skip the below command if we could somehow determine that
+                                    // the peer isn't publishing to full nodes at the moment?
+                                    //
+                                    // send verified_message carrying author signature
+                                    proposal_cmds.push(ConsensusCommand::PublishToFullNodes {
+                                        epoch: proposal_epoch,
+                                        round: proposal_round,
+                                        message: verified_message,
+                                    });
+                                    proposal_cmds
+                                }
+                                ProtocolMessage::Vote(msg) => {
+                                    consensus.handle_vote_message(author, msg)
+                                }
+                                ProtocolMessage::Timeout(msg) => {
+                                    consensus.handle_timeout_message(author, msg)
+                                }
+                                ProtocolMessage::RoundRecovery(msg) => {
+                                    consensus.handle_round_recovery_message(author, msg)
+                                }
+                                ProtocolMessage::NoEndorsement(msg) => {
+                                    consensus.handle_no_endorsement_message(author, msg)
+                                }
+                                ProtocolMessage::AdvanceRound(msg) => {
+                                    consensus.handle_advance_round_message(author, msg)
+                                }
                             }
                         }
-                    }
-                    Err(evidence) => {
-                        // If we have evidence, we return it as commands
-                        evidence
+                        Err(evidence) => {
+                            // If we have evidence, we return it as commands
+                            evidence
+                        }
                     }
                 }
             }
@@ -780,5 +837,346 @@ where
             }
         }
         parent_cmds
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use monad_consensus::{
+        messages::{
+            consensus_message::{ConsensusMessage, ProtocolMessage},
+            message::{
+                AdvanceRoundMessage, NoEndorsementMessage, RoundRecoveryMessage, TimeoutMessage,
+                VoteMessage,
+            },
+        },
+        validation::signing::{Unvalidated, Unverified},
+    };
+    use monad_consensus_types::{
+        block::{
+            ConsensusBlockHeader, MockExecutionBody, MockExecutionProposedHeader,
+            MockExecutionProtocol,
+        },
+        metrics::Metrics,
+        no_endorsement::NoEndorsement,
+        payload::{ConsensusBlockBody, ConsensusBlockBodyInner, RoundSignature},
+        quorum_certificate::QuorumCertificate,
+        timeout::{HighExtend, HighExtendVote, Timeout, TimeoutCertificate, TimeoutInfo},
+        tip::ConsensusTip,
+        voting::Vote,
+        RoundCertificate,
+    };
+    use monad_crypto::{certificate_signature::CertificateKeyPair, NopKeyPair, NopSignature};
+    use monad_testutil::signing::MockSignatures;
+    use monad_types::{BlockId, Epoch, Hash, NodeId, Round, SeqNum, GENESIS_ROUND};
+
+    use super::prefilter_old_consensus_message;
+
+    type SignatureType = NopSignature;
+    type SignatureCollectionType = MockSignatures<SignatureType>;
+    type ExecutionProtocolType = MockExecutionProtocol;
+
+    fn fake_signature(byte: u8) -> SignatureType {
+        let keypair = NopKeyPair::from_bytes(&mut [byte; 32]).unwrap();
+        SignatureType {
+            pubkey: keypair.pubkey(),
+            id: byte as u64,
+        }
+    }
+
+    fn fake_qc(round: Round) -> QuorumCertificate<SignatureCollectionType> {
+        QuorumCertificate::new(
+            Vote {
+                id: BlockId(Hash([round.as_u64() as u8; 32])),
+                epoch: Epoch(1),
+                round,
+            },
+            SignatureCollectionType::with_pubkeys(&[]),
+        )
+    }
+
+    fn fake_tc(
+        round: Round,
+    ) -> TimeoutCertificate<SignatureType, SignatureCollectionType, ExecutionProtocolType> {
+        TimeoutCertificate {
+            epoch: Epoch(1),
+            round,
+            tip_rounds: Default::default(),
+            high_extend: HighExtend::Qc(QuorumCertificate::genesis_qc()),
+        }
+    }
+
+    fn wrap_message(
+        message: ProtocolMessage<SignatureType, SignatureCollectionType, ExecutionProtocolType>,
+    ) -> Unverified<
+        SignatureType,
+        Unvalidated<
+            ConsensusMessage<SignatureType, SignatureCollectionType, ExecutionProtocolType>,
+        >,
+    > {
+        Unverified::new(
+            Unvalidated::new(ConsensusMessage {
+                version: 1,
+                message,
+            }),
+            fake_signature(99),
+        )
+    }
+
+    fn fake_proposal(
+        proposal_round: Round,
+    ) -> monad_consensus::messages::message::ProposalMessage<
+        SignatureType,
+        SignatureCollectionType,
+        ExecutionProtocolType,
+    > {
+        let keypair = NopKeyPair::from_bytes(&mut [7; 32]).unwrap();
+        let block_body = ConsensusBlockBody::new(ConsensusBlockBodyInner {
+            execution_body: MockExecutionBody {
+                data: vec![].into(),
+            },
+        });
+        let block_header = ConsensusBlockHeader::new(
+            NodeId::new(keypair.pubkey()),
+            Epoch(1),
+            proposal_round,
+            Vec::new(),
+            MockExecutionProposedHeader {},
+            block_body.get_id(),
+            QuorumCertificate::genesis_qc(),
+            SeqNum(1),
+            0,
+            RoundSignature::new(proposal_round, &keypair),
+            0,
+            0,
+            0,
+        );
+
+        monad_consensus::messages::message::ProposalMessage {
+            proposal_round,
+            proposal_epoch: Epoch(1),
+            tip: ConsensusTip::new(&keypair, block_header, None),
+            block_body,
+            last_round_tc: None,
+        }
+    }
+
+    #[test]
+    fn predrops_old_vote_before_validation() {
+        let current_round = Round(10);
+        let mut metrics = Metrics::default();
+        let message = wrap_message(ProtocolMessage::Vote(VoteMessage {
+            vote: Vote {
+                id: BlockId(Hash([1; 32])),
+                epoch: Epoch(1),
+                round: current_round - Round(1),
+            },
+            sig: fake_signature(1),
+        }));
+
+        assert!(prefilter_old_consensus_message(
+            &mut metrics,
+            current_round,
+            &message,
+        ));
+        assert_eq!(metrics.consensus_events.old_vote_received, 1);
+    }
+
+    #[test]
+    fn predrops_old_timeout_before_validation() {
+        let current_round = Round(10);
+        let mut metrics = Metrics::default();
+        let message = wrap_message(ProtocolMessage::Timeout(TimeoutMessage(Timeout {
+            tminfo: TimeoutInfo {
+                epoch: Epoch(1),
+                round: current_round - Round(1),
+                high_qc_round: GENESIS_ROUND,
+                high_tip_round: GENESIS_ROUND,
+            },
+            timeout_signature: fake_signature(2),
+            high_extend: HighExtendVote::Qc(QuorumCertificate::genesis_qc()),
+            last_round_certificate: None,
+        })));
+
+        assert!(prefilter_old_consensus_message(
+            &mut metrics,
+            current_round,
+            &message,
+        ));
+        assert_eq!(metrics.consensus_events.old_remote_timeout, 1);
+    }
+
+    #[test]
+    fn predrops_old_no_endorsement_before_validation() {
+        let current_round = Round(10);
+        let mut metrics = Metrics::default();
+        let message = wrap_message(ProtocolMessage::NoEndorsement(NoEndorsementMessage {
+            msg: NoEndorsement {
+                epoch: Epoch(1),
+                round: current_round - Round(1),
+                tip_qc_round: GENESIS_ROUND,
+            },
+            signature: fake_signature(3),
+        }));
+
+        assert!(prefilter_old_consensus_message(
+            &mut metrics,
+            current_round,
+            &message,
+        ));
+        assert_eq!(metrics.consensus_events.old_no_endorsement_received, 1);
+    }
+
+    #[test]
+    fn predrops_old_advance_round_qc_before_validation() {
+        let current_round = Round(10);
+        let mut metrics = Metrics::default();
+        let message = wrap_message(ProtocolMessage::AdvanceRound(AdvanceRoundMessage {
+            last_round_certificate: RoundCertificate::Qc(fake_qc(current_round - Round(1))),
+        }));
+
+        assert!(prefilter_old_consensus_message(
+            &mut metrics,
+            current_round,
+            &message,
+        ));
+        assert_eq!(metrics.consensus_events.process_old_qc, 1);
+    }
+
+    #[test]
+    fn predrops_old_advance_round_tc_before_validation() {
+        let current_round = Round(10);
+        let mut metrics = Metrics::default();
+        let message = wrap_message(ProtocolMessage::AdvanceRound(AdvanceRoundMessage {
+            last_round_certificate: RoundCertificate::Tc(fake_tc(current_round - Round(1))),
+        }));
+
+        assert!(prefilter_old_consensus_message(
+            &mut metrics,
+            current_round,
+            &message,
+        ));
+        assert_eq!(metrics.consensus_events.process_old_tc, 1);
+    }
+
+    #[test]
+    fn predrops_old_round_recovery_before_validation() {
+        let current_round = Round(10);
+        let mut metrics = Metrics::default();
+        let message = wrap_message(ProtocolMessage::RoundRecovery(RoundRecoveryMessage {
+            round: current_round - Round(1),
+            epoch: Epoch(1),
+            tc: fake_tc(current_round - Round(2)),
+        }));
+
+        assert!(prefilter_old_consensus_message(
+            &mut metrics,
+            current_round,
+            &message,
+        ));
+        assert_eq!(metrics.consensus_events.process_old_tc, 1);
+    }
+
+    #[test]
+    fn boundary_messages_are_not_predropped() {
+        let current_round = Round(10);
+        let next_round = current_round + Round(1);
+
+        let messages = [
+            wrap_message(ProtocolMessage::Vote(VoteMessage {
+                vote: Vote {
+                    id: BlockId(Hash([2; 32])),
+                    epoch: Epoch(1),
+                    round: current_round,
+                },
+                sig: fake_signature(4),
+            })),
+            wrap_message(ProtocolMessage::Vote(VoteMessage {
+                vote: Vote {
+                    id: BlockId(Hash([3; 32])),
+                    epoch: Epoch(1),
+                    round: next_round,
+                },
+                sig: fake_signature(5),
+            })),
+            wrap_message(ProtocolMessage::Timeout(TimeoutMessage(Timeout {
+                tminfo: TimeoutInfo {
+                    epoch: Epoch(1),
+                    round: current_round,
+                    high_qc_round: GENESIS_ROUND,
+                    high_tip_round: GENESIS_ROUND,
+                },
+                timeout_signature: fake_signature(6),
+                high_extend: HighExtendVote::Qc(QuorumCertificate::genesis_qc()),
+                last_round_certificate: None,
+            }))),
+            wrap_message(ProtocolMessage::Timeout(TimeoutMessage(Timeout {
+                tminfo: TimeoutInfo {
+                    epoch: Epoch(1),
+                    round: next_round,
+                    high_qc_round: GENESIS_ROUND,
+                    high_tip_round: GENESIS_ROUND,
+                },
+                timeout_signature: fake_signature(7),
+                high_extend: HighExtendVote::Qc(QuorumCertificate::genesis_qc()),
+                last_round_certificate: None,
+            }))),
+            wrap_message(ProtocolMessage::RoundRecovery(RoundRecoveryMessage {
+                round: current_round,
+                epoch: Epoch(1),
+                tc: fake_tc(current_round - Round(1)),
+            })),
+            wrap_message(ProtocolMessage::RoundRecovery(RoundRecoveryMessage {
+                round: next_round,
+                epoch: Epoch(1),
+                tc: fake_tc(current_round),
+            })),
+            wrap_message(ProtocolMessage::NoEndorsement(NoEndorsementMessage {
+                msg: NoEndorsement {
+                    epoch: Epoch(1),
+                    round: current_round,
+                    tip_qc_round: GENESIS_ROUND,
+                },
+                signature: fake_signature(8),
+            })),
+            wrap_message(ProtocolMessage::NoEndorsement(NoEndorsementMessage {
+                msg: NoEndorsement {
+                    epoch: Epoch(1),
+                    round: next_round,
+                    tip_qc_round: GENESIS_ROUND,
+                },
+                signature: fake_signature(9),
+            })),
+            wrap_message(ProtocolMessage::AdvanceRound(AdvanceRoundMessage {
+                last_round_certificate: RoundCertificate::Qc(fake_qc(current_round)),
+            })),
+            wrap_message(ProtocolMessage::AdvanceRound(AdvanceRoundMessage {
+                last_round_certificate: RoundCertificate::Tc(fake_tc(next_round)),
+            })),
+        ];
+
+        for message in messages {
+            let mut metrics = Metrics::default();
+            assert!(!prefilter_old_consensus_message(
+                &mut metrics,
+                current_round,
+                &message,
+            ));
+            assert_eq!(metrics.consensus_events.old_vote_received, 0);
+            assert_eq!(metrics.consensus_events.old_remote_timeout, 0);
+            assert_eq!(metrics.consensus_events.old_no_endorsement_received, 0);
+            assert_eq!(metrics.consensus_events.process_old_qc, 0);
+            assert_eq!(metrics.consensus_events.process_old_tc, 0);
+        }
+
+        let mut metrics = Metrics::default();
+        let old_proposal = wrap_message(ProtocolMessage::Proposal(fake_proposal(
+            current_round - Round(1),
+        )));
+        assert!(!prefilter_old_consensus_message(
+            &mut metrics,
+            current_round,
+            &old_proposal,
+        ));
     }
 }
